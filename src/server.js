@@ -15,7 +15,9 @@ import sourcesRoutes from './routes/sources.js';
 import analyticsRoutes from './routes/analytics.js';
 import settingsRoutes from './routes/settings.js';
 import agentRoutes from './routes/agent.js';
+import adminUsersRoutes from './routes/adminUsers.js';
 import aiRoutes, { handleAiDebug, handleAiStatus, handleAiTest } from './routes/ai.js';
+import jobAssistantRoutes from './routes/jobAssistant.js';
 import gmailRoutes from './routes/gmail.js';
 import User from './models/User.js';
 import bcrypt from 'bcryptjs';
@@ -33,7 +35,7 @@ logger.info('Gmail OAuth config', {
 const app = express();
 app.use(cookieParserMiddleware);
 app.use(helmet());
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 const origins = (process.env.CORS_ORIGINS || 'http://localhost:5173')
   .split(',')
@@ -67,11 +69,23 @@ protectedApi.use('/sources', sourcesRoutes);
 protectedApi.use('/analytics', analyticsRoutes);
 protectedApi.use('/settings', settingsRoutes);
 protectedApi.use('/agent', agentRoutes);
+protectedApi.use('/admin', adminUsersRoutes);
 protectedApi.use('/ai', aiRoutes);
+protectedApi.use('/job-assistant', jobAssistantRoutes);
 
 app.use('/api', protectedApi);
 
 app.use(errorHandler);
+
+async function migrateLegacyUsers() {
+  await User.updateMany(
+    {
+      isApproved: { $exists: false },
+      $or: [{ isVerified: true }, { role: { $in: ['Admin', 'admin'] } }]
+    },
+    { $set: { isApproved: true } }
+  );
+}
 
 async function bootstrapAdmin() {
   const count = await User.countDocuments();
@@ -88,7 +102,8 @@ async function bootstrapAdmin() {
     email: email.toLowerCase(),
     password: hash,
     role: 'Admin',
-    isVerified: true
+    isVerified: true,
+    isApproved: true
   });
   logger.info(`Bootstrap admin created: ${email}`);
 }
@@ -112,6 +127,7 @@ async function main() {
     process.exit(1);
   }
   await connectDb(resolveMongoUri());
+  await migrateLegacyUsers();
   await bootstrapAdmin();
   await ensureDefaultSources();
   startScraperJobs();

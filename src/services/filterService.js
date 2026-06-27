@@ -1,72 +1,105 @@
+import { INCLUDE_KEYWORDS, EXCLUDE_KEYWORDS } from '../config/constants.js';
 import {
-  INCLUDE_KEYWORDS,
-  EXCLUDE_KEYWORDS,
-  DRC_KEYWORDS
-} from '../config/constants.js';
-import { detectTargetCity, findKeywordMatches, isServiceLogistique } from '../config/businessRules.js';
-
-function normalize(text) {
-  return (text || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '');
-}
-
-function findMatches(haystack, keywords) {
-  const n = normalize(haystack);
-  const matched = [];
-  for (const kw of keywords) {
-    if (n.includes(normalize(kw))) matched.push(kw);
-  }
-  return matched;
-}
-
-function inferCategory(text) {
-  const t = normalize(text);
-  if (/(chauffeur|driver|conduite|defensive driving)/.test(t)) return 'formation_chauffeurs';
-  if (/(formation|training|workshop|atelier)/.test(t)) return 'formation';
-  if (/(etude de marche|market study|feasibility|etude de faisabilite)/.test(t)) return 'etude_marche';
-  if (/(inventaire general|general inventory)/.test(t)) return 'inventaire_general';
-  if (/(actifs|asset inventory|assets inventory)/.test(t)) return 'inventaire_actifs';
-  if (/(inventaire|inventory)/.test(t)) return 'inventaire_general';
-  if (/(consult|conseil|advisory|assistance|appui|support technique)/.test(t)) return 'consultance';
-  return 'assistance';
-}
+  assessRdcLocation,
+  classifyMecalCategory,
+  findKeywordMatches,
+  hasAiProviders,
+  isEligibleForAiReview,
+  isJobPosting,
+  isRdcTrustedPlatform,
+  MECAL_CATEGORY_KEYWORDS,
+  NON_LOGISTICS_EXCLUSIONS,
+  includesAny,
+  resolveVille
+} from '../config/businessRules.js';
 
 /**
- * Returns { accept, reason, rawKeywords, category } for a scraped item.
- * @param {object} opts
- * @param {string[]} [opts.extraInclude] — additional include phrases from user settings
+ * Returns { accept, reason, rawKeywords, category, locationStatus, ville, needsAiReview } for a scraped item.
  */
 export function analyzeOpportunity(
-  { title = '', description = '', organization = '' },
+  { title = '', description = '', organization = '', location = '', platform = '' },
   { extraInclude = [] } = {}
 ) {
-  const blob = `${title}\n${description}\n${organization}`;
-  const includeList = [...INCLUDE_KEYWORDS, ...extraInclude.map((s) => String(s).toLowerCase())];
-  const excludeHits = findKeywordMatches(blob, EXCLUDE_KEYWORDS);
-  if (excludeHits.length > 0) {
-    return { accept: false, reason: 'exclude_keyword', rawKeywords: excludeHits, category: null };
+  const blob = `${title}\n${description}\n${organization}\n${location}`;
+  const trustedRdcSource = isRdcTrustedPlatform(platform);
+
+  if (isJobPosting(blob)) {
+    const jobHits = findKeywordMatches(blob, EXCLUDE_KEYWORDS);
+    return {
+      accept: false,
+      reason: 'job_posting',
+      rawKeywords: jobHits,
+      category: null,
+      locationStatus: null,
+      type: 'offre_emploi',
+      needsAiReview: false
+    };
   }
-  if (!isServiceLogistique({ title, description, organization })) {
-    return { accept: false, reason: 'not_mecal_service', rawKeywords: [], category: null };
+
+  if (includesAny(blob, NON_LOGISTICS_EXCLUSIONS)) {
+    return {
+      accept: false,
+      reason: 'non_logistics',
+      rawKeywords: findKeywordMatches(blob, NON_LOGISTICS_EXCLUSIONS),
+      category: null,
+      locationStatus: null,
+      type: 'autre',
+      needsAiReview: false
+    };
   }
-  const includeHits = findMatches(blob, includeList);
-  if (includeHits.length === 0) {
-    return { accept: false, reason: 'no_include_match', rawKeywords: [], category: null };
+
+  const locationStatus = assessRdcLocation(blob, location, { trustedRdcSource });
+  if (locationStatus === 'hors_rdc') {
+    return {
+      accept: false,
+      reason: 'hors_rdc',
+      rawKeywords: [],
+      category: null,
+      locationStatus,
+      type: 'service',
+      needsAiReview: false
+    };
   }
-  const drcHits = findMatches(blob, DRC_KEYWORDS);
-  const ville = detectTargetCity(blob);
-  if (drcHits.length === 0 || !ville) {
-    return { accept: false, reason: 'no_drc_geo', rawKeywords: includeHits, category: null };
+
+  const ville = resolveVille({ title, description, location });
+  let category = classifyMecalCategory(blob);
+
+  if (category) {
+    const categoryKeywords = [...(MECAL_CATEGORY_KEYWORDS[category] || []), ...extraInclude.map((s) => String(s).toLowerCase())];
+    const includeHits = findKeywordMatches(blob, [...INCLUDE_KEYWORDS, ...categoryKeywords]);
+    return {
+      accept: true,
+      reason: 'ok',
+      rawKeywords: [...new Set(includeHits)],
+      category,
+      ville,
+      locationStatus: 'rdc_confirme',
+      type: 'service',
+      needsAiReview: false
+    };
   }
-  const category = inferCategory(blob);
+
+  if (hasAiProviders() && isEligibleForAiReview(blob) && trustedRdcSource) {
+    return {
+      accept: true,
+      reason: 'needs_ai_review',
+      rawKeywords: [],
+      category: null,
+      ville,
+      locationStatus,
+      type: 'service',
+      needsAiReview: true
+    };
+  }
+
   return {
-    accept: true,
-    reason: 'ok',
-    rawKeywords: [...new Set([...includeHits, ...drcHits])],
-    category,
-    ville
+    accept: false,
+    reason: 'not_mecal_service',
+    rawKeywords: [],
+    category: null,
+    locationStatus,
+    type: 'autre',
+    needsAiReview: false
   };
 }
 

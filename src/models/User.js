@@ -14,6 +14,8 @@ const UserSchema = new mongoose.Schema(
       default: 'Analyste'
     },
     isVerified: { type: Boolean, default: false },
+    isApproved: { type: Boolean, default: false },
+    lastLoginAt: { type: Date, default: null },
     otpHash: { type: String, default: null },
     otpExpiresAt: { type: Date, default: null },
     lastOtpSentAt: { type: Date, default: null },
@@ -29,7 +31,19 @@ const UserSchema = new mongoose.Schema(
       default: 'daily'
     },
     keywords: [{ type: String }],
-    preferredLanguage: { type: String, enum: ['en', 'fr', 'sw'], default: 'fr' }
+    preferredLanguage: { type: String, enum: ['en', 'fr', 'sw'], default: 'fr' },
+    jobAssistantProfile: {
+      fullName: { type: String, default: '' },
+      email: { type: String, default: '' },
+      phone: { type: String, default: '' },
+      education: { type: String, default: '' },
+      experience: { type: String, default: '' },
+      skills: { type: String, default: '' },
+      languages: { type: String, default: '' },
+      cvFileName: { type: String, default: '' },
+      cvFilePath: { type: String, default: '' },
+      cvUploadedAt: { type: Date, default: null }
+    }
   },
   { timestamps: true }
 );

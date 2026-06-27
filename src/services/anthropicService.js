@@ -4,9 +4,11 @@ import { callAIForJSON, callAIText } from './aiService.js';
 export async function callClaudeJson(prompt, fallback) {
   try {
     const result = await callAIForJSON(prompt);
+    if (Array.isArray(result.data)) return result.data;
     return { ...result.data, source: result.provider };
   } catch (e) {
     logger.warn(`IA JSON indisponible: ${e.message}`);
+    if (Array.isArray(fallback)) return fallback;
     return { ...fallback, source: 'fallback_local' };
   }
 }

@@ -11,9 +11,10 @@ export const DEFAULT_SOURCES = [
   {
     key: 'DevEx',
     name: 'DevEx',
-    url: 'https://www.devex.com',
+    url: 'https://www.devex.com/funding/r',
     scraperKey: 'DevEx',
-    description: 'Marchés, consultances et opportunités développement.'
+    description: 'Funding Devex (souvent payant Devex Pro). Ajoutez DEVEX_DISABLED=true si 0 résultat.',
+    enabled: false
   },
   {
     key: 'UNjobs',
@@ -57,16 +58,16 @@ export const DEFAULT_SOURCES = [
   {
     key: 'AchatPublicRDC',
     name: 'Marchés publics RDC',
-    url: 'https://armp-rdc.org',
+    url: 'https://marche.armp-rdc.cd',
     scraperKey: 'AchatPublicRDC',
-    description: 'Sites gouvernementaux RDC et avis publics.'
+    description: 'Avis d’appels d’offres SIGMAP / ARMP.'
   },
   {
     key: 'ProfilRDC',
-    name: 'Profil RDC',
-    url: 'https://www.profilrdc.com',
+    name: 'Manifestations d’intérêt RDC',
+    url: 'https://marche.armp-rdc.cd/categorie-poste/avis-a-manifestations-dinterets',
     scraperKey: 'ProfilRDC',
-    description: 'Veille locale RDC.'
+    description: 'Avis à manifestations d’intérêt (consultances) sur le portail ARMP.'
   },
   {
     key: 'GoogleCustomSearch',
@@ -78,8 +79,62 @@ export const DEFAULT_SOURCES = [
   }
 ];
 
+/** Sources complémentaires — ajoutées sans modifier DEFAULT_SOURCES existant */
+export const ADDITIONAL_VEILLE_SOURCES = [
+  {
+    key: 'DevExVeille',
+    name: 'DevEx — Veille RDC logistique',
+    url: 'https://www.devex.com',
+    scraperKey: 'DevExVeille',
+    description:
+      'Funding Devex filtré RDC (DRC/RDC) — logistique, transport, supply chain, consultance. FR/EN. Fréquence 12h.',
+    frequencyHours: 12,
+    enabled: true
+  },
+  {
+    key: 'UNGMVeille',
+    name: 'UNGM — Logistique humanitaire RDC',
+    url: 'https://www.ungm.org',
+    scraperKey: 'UNGMVeille',
+    description:
+      'Marchés UNGM RDC — transport, entreposage, supply chain humanitaire. Fréquence 12h.',
+    frequencyHours: 12,
+    enabled: true
+  },
+  {
+    key: 'AfDBVeille',
+    name: 'African Development Bank — Projets RDC',
+    url: 'https://www.afdb.org/en/projects-and-operations/procurement',
+    scraperKey: 'AfDBVeille',
+    description:
+      'Marchés BAD — projets RDC, infrastructure, transport et logistique. Fréquence 12h.',
+    frequencyHours: 12,
+    enabled: true
+  },
+  {
+    key: 'CoordinationSud',
+    name: 'Coordination Sud',
+    url: 'https://www.coordinationsud.org/offres-emploi/',
+    scraperKey: null,
+    description:
+      "Réseau d'ONG françaises — offres emploi humanitaire Afrique (Assistant Emploi).",
+    frequencyHours: 12,
+    enabled: true
+  },
+  {
+    key: 'ImpactPool',
+    name: 'Impact Pool',
+    url: 'https://www.impactpool.org/jobs',
+    scraperKey: null,
+    description:
+      'Plateforme emploi ONG/UN internationale — supply chain & logistique (Assistant Emploi).',
+    frequencyHours: 12,
+    enabled: true
+  }
+];
+
 export async function ensureDefaultSources() {
-  for (const source of DEFAULT_SOURCES) {
+  for (const source of [...DEFAULT_SOURCES, ...ADDITIONAL_VEILLE_SOURCES]) {
     await Source.updateOne(
       { key: source.key },
       { $setOnInsert: { enabled: true, frequencyHours: 12, ...source } },

@@ -1,7 +1,85 @@
 import axios from 'axios';
 import logger from '../utils/logger.js';
 import { callClaudeJson, callClaudeText } from './anthropicService.js';
-import { SERVICES_MECAL, detectTargetCity, isServiceLogistique, includesAny, EMPLOIS_EXCLUS } from '../config/businessRules.js';
+import {
+  SERVICES_MECAL,
+  NON_LOGISTICS_EXCLUSIONS,
+  assessRdcLocation,
+  classifyMecalCategory,
+  detectTargetCity,
+  includesAny,
+  isJobPosting,
+  isServiceOpportunity,
+  mapAiCategoryToSlug,
+  resolveVille
+} from '../config/businessRules.js';
+
+const CATEGORY_LABELS = {
+  formation: SERVICES_MECAL[0],
+  formation_chauffeurs: SERVICES_MECAL[1],
+  etude_marche: SERVICES_MECAL[2],
+  inventaire_actifs: SERVICES_MECAL[3],
+  inventaire_general: SERVICES_MECAL[4],
+  consultance: SERVICES_MECAL[5]
+};
+
+const MECAL_SYSTEM_PROMPT = `Tu es un agent de veille spécialisé dans les SERVICES logistiques en République Démocratique du Congo (RDC) uniquement.
+
+Ta mission : identifier UNIQUEMENT des opportunités correspondant à l'une de ces 6 catégories de SERVICES (jamais de postes à pourvoir) :
+1. Formations procédures logistiques
+2. Formation chauffeurs / conduite de véhicules
+3. Étude de marchés (commercial / logistique — PAS étude d'impact environnemental EIES/ESIA)
+4. Inventaire d'Actifs d'une Organisation
+5. Inventaire général d'une Organisation
+6. Consultance, Assistance et Conseils en logistique (supply chain, stocks, entrepôts, distribution)
+
+RÈGLES D'EXCLUSION (rejette systématiquement — categorie = "non pertinent") :
+- Toute offre d'emploi/recrutement de personnel : magasinier, assistant logistique, officier logistique, manager logistique, spécialiste, expert individuel salarié, CDI, CDD, h/f, CV.
+- Travaux routiers, surveillance de chantiers, génie civil, assainissement, eau/santé, audits techniques généraux, cybersécurité, achats de véhicules/mobiliers/informatique.
+- Études environnementales (EIES, ESIA) — ce ne sont PAS des études de marché logistique.
+- Toute opportunité hors RDC (ne pas confondre RDC avec Congo-Brazzaville).
+
+RÈGLES D'INCLUSION :
+- Appels d'offres, TDR, RFP/RFQ, missions de prestation logistique correspondant aux 6 catégories ci-dessus.
+- Pour ville_confirmee : indique Bukavu, Goma, Kinshasa, Kalemie, Lubumbashi si mention explicite dans le titre/lieu du projet ; sinon "RDC" pour un marché national ; "Non précisé" si inconnu. Ne mets pas Kinshasa par défaut.
+
+Si type = "offre_emploi" OU hors périmètre logistique OU pays_confirme_rdc = false → categorie = "non pertinent".`;
+
+function normalizeAiAnalysis(raw = {}, texte = '') {
+  const type = raw.type || (raw.est_emploi ? 'offre_emploi' : raw.est_service ? 'service' : 'autre');
+  const pays =
+    raw.pays_confirme_rdc === true || raw.pays_confirme_rdc === 'true'
+      ? 'true'
+      : raw.pays_confirme_rdc === false || raw.pays_confirme_rdc === 'false'
+        ? 'false'
+        : 'a_verifier';
+
+  const estEmploi = type === 'offre_emploi' || Boolean(raw.est_emploi) || isJobPosting(texte);
+  const heuristicCategory = classifyMecalCategory(texte);
+  const estService =
+    !estEmploi &&
+    (type === 'service' || Boolean(raw.est_service) || heuristicCategory !== null) &&
+    !includesAny(texte, NON_LOGISTICS_EXCLUSIONS);
+  const categorie =
+    estEmploi || pays === 'false' || String(raw.categorie || '').toLowerCase().includes('non pertinent') || !estService
+      ? 'non pertinent'
+      : raw.categorie || CATEGORY_LABELS[heuristicCategory] || 'non pertinent';
+
+  return {
+    est_service: estService,
+    est_emploi: estEmploi,
+    type,
+    score: Number(raw.score || 0),
+    categorie,
+    pays_confirme_rdc: pays,
+    justification: raw.justification || raw.raison || '',
+    recommandation: raw.recommandation || (estService && pays !== 'false' ? 'EVALUER' : 'IGNORER'),
+    raison: raw.raison || raw.justification || '',
+    ville_confirmee: raw.ville_confirmee || detectTargetCity(texte) || 'Non précisé',
+    points_forts: raw.points_forts || [],
+    action_suggeree: raw.action_suggeree || 'Envoyer proposition commerciale'
+  };
+}
 
 function hasAnyAIProvider() {
   return Boolean(process.env.ANTHROPIC_API_KEY || process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY);
@@ -14,15 +92,30 @@ function hasAnyAIProvider() {
 export async function scoreRelevanceWithAI({ title, description, organization }) {
   if (hasAnyAIProvider()) {
     const analysis = await analyzeOpportunityForMecal({ title, description, organization });
-    if (analysis.est_emploi || !analysis.est_service) return 0;
+    if (
+      analysis.est_emploi ||
+      !analysis.est_service ||
+      analysis.pays_confirme_rdc === 'false' ||
+      analysis.categorie === 'non pertinent'
+    ) {
+      return 0;
+    }
     return Math.min(1, Math.max(0, Number(analysis.score || 0) / 100));
   }
   const key = process.env.OPENAI_API_KEY;
   if (!key) return null;
   const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-  const prompt = `You classify procurement/service notices for a logistics consultancy in DRC.
-Return ONLY a JSON object: {"score": number between 0 and 1, "is_service_not_job": boolean}
-Score high if it is logistics training, consultancy, inventory, market study, or assistance — not a staff job vacancy.
+  const prompt = `You classify procurement/service notices for a logistics consultancy in DRC ONLY.
+Return ONLY JSON:
+{
+  "score": number between 0 and 1,
+  "is_service_not_job": boolean,
+  "type": "service" | "offre_emploi" | "autre",
+  "pays_confirme_rdc": true | false | "a_verifier"
+}
+Reject staff job vacancies (Magasinier, Assistant Logistique, Manager Logistique, CDI/CDD, recruitment).
+Reject anything outside Democratic Republic of Congo (not Congo-Brazzaville).
+Score high only for logistics training, consultancy, inventory, market study, assistance — as external service contracts.
 Title: ${title}
 Org: ${organization}
 Text: ${(description || '').slice(0, 4000)}`;
@@ -56,46 +149,53 @@ Text: ${(description || '').slice(0, 4000)}`;
   }
 }
 
-export async function analyzeOpportunityForMecal({ title, description, organization, ville }) {
-  const texte = `${title} ${description} ${organization} ${ville || ''}`;
-  const fallback = {
-    est_service: isServiceLogistique({ title, description, organization }),
-    est_emploi: includesAny(texte, EMPLOIS_EXCLUS),
-    score: isServiceLogistique({ title, description, organization }) ? 72 : 0,
-    categorie: 'consultance',
-    recommandation: isServiceLogistique({ title, description, organization }) ? 'EVALUER' : 'IGNORER',
-    raison: 'Analyse heuristique locale, clé Anthropic absente.',
-    ville_confirmee: detectTargetCity(texte) || 'Non précisé',
-    points_forts: ['Correspondance avec les services M-ECAL'],
-    action_suggeree: 'Envoyer proposition commerciale'
-  };
-  const prompt = `Tu es un assistant pour M-ECAL (Maison d'Études, de Conseil et d'Assistance Logistique en RDC).
+export async function analyzeOpportunityForMecal({ title, description, organization, ville, location = '' }) {
+  const texte = `${title} ${description} ${organization} ${ville || ''} ${location || ''}`;
+  const locationStatus = assessRdcLocation(texte, location);
+  const heuristicCategory = classifyMecalCategory(texte);
+  const fallback = normalizeAiAnalysis(
+    {
+      est_service: heuristicCategory !== null,
+      est_emploi: isJobPosting(texte),
+      type: isJobPosting(texte) ? 'offre_emploi' : heuristicCategory ? 'service' : 'autre',
+      score: heuristicCategory && locationStatus !== 'hors_rdc' ? 75 : 0,
+      categorie: heuristicCategory ? CATEGORY_LABELS[heuristicCategory] : 'non pertinent',
+      pays_confirme_rdc: locationStatus === 'rdc_confirme' ? 'true' : locationStatus === 'hors_rdc' ? 'false' : 'a_verifier',
+      justification: 'Analyse heuristique locale (services logistiques M-ECAL uniquement).',
+      recommandation: heuristicCategory && locationStatus !== 'hors_rdc' ? 'EVALUER' : 'IGNORER',
+      ville_confirmee: resolveVille({ title, description, location }),
+      points_forts: heuristicCategory ? ['Correspondance catégorie logistique M-ECAL'] : [],
+      action_suggeree: 'Envoyer proposition commerciale'
+    },
+    texte
+  );
 
-SERVICES QUE PROPOSE M-ECAL (et UNIQUEMENT ceux-là) :
-${SERVICES_MECAL.map((s, i) => `${i + 1}. ${s}`).join('\n')}
-
-IMPORTANT : M-ECAL NE POSTULE PAS aux offres d'emploi.
-Les fonctions comme Magasinier, Assistant Logistique, Officier Logistique, Manager Logistique sont des EMPLOIS, pas des services. Les ignorer complètement.
+  const prompt = `${MECAL_SYSTEM_PROMPT}
 
 Analyse cette offre :
 Titre : ${title}
 Description : ${(description || '').slice(0, 5000)}
 Organisation : ${organization || 'Non précisé'}
-Ville : ${ville || 'Non précisé'}
+Ville / localisation : ${ville || location || 'Non précisé'}
 
 Réponds UNIQUEMENT en JSON :
 {
   "est_service": true,
   "est_emploi": false,
+  "type": "service",
   "score": 0,
-  "categorie": "formation|etude|inventaire|consultance|autre",
+  "categorie": "Formations procédures logistiques|Formation chauffeurs / conduite de véhicules|Étude de marchés|Inventaire d'Actifs d'une Organisation|Inventaire général d'une Organisation|Consultance, Assistance et Conseils en logistique|non pertinent",
+  "pays_confirme_rdc": true,
+  "justification": "courte explication",
   "recommandation": "POSTULER|EVALUER|IGNORER",
-  "raison": "explication courte",
+  "raison": "courte explication",
   "ville_confirmee": "Goma|Bukavu|Kinshasa|Kalemie|Lubumbashi|RDC|Non précisé",
   "points_forts": ["...", "..."],
   "action_suggeree": "Envoyer proposition commerciale|Lettre de motivation|..."
 }`;
-  return callClaudeJson(prompt, fallback);
+
+  const raw = await callClaudeJson(prompt, fallback);
+  return normalizeAiAnalysis(raw, texte);
 }
 
 export async function generateMotivationLetter(opp, profile = {}) {

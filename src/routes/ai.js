@@ -1,6 +1,14 @@
 import { Router } from 'express';
 import Opportunity from '../models/Opportunity.js';
 import { generateCommercialProposal, generateMarketingSuggestions, generateMotivationLetter, suggestEmailReplies } from '../services/aiClassifierService.js';
+import {
+  analyzeOpportunities,
+  askMarketingQuestion,
+  buildMarketingStats,
+  buildWeeklyChart,
+  generateMarketingContent,
+  loadApplicationsForMarketing
+} from '../services/marketingAnalysisService.js';
 import { callAIWithFallback, getProvidersStatus, testAllProviders } from '../services/aiService.js';
 import SystemSetting from '../models/SystemSetting.js';
 
@@ -100,8 +108,52 @@ router.post('/email-reply', async (req, res, next) => {
 
 router.post('/marketing-suggestions', async (req, res, next) => {
   try {
-    const suggestions = await generateMarketingSuggestions(req.body?.stats || {});
+    const raw = await generateMarketingSuggestions(req.body?.stats || {});
+    const suggestions = Array.isArray(raw)
+      ? raw
+      : Array.isArray(raw?.suggestions)
+        ? raw.suggestions
+        : [];
     res.json({ suggestions });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/marketing/analyze', async (_req, res, next) => {
+  try {
+    const applications = await loadApplicationsForMarketing();
+    const stats = buildMarketingStats(applications);
+    const chart = buildWeeklyChart(applications);
+    const conseils = applications.length ? await analyzeOpportunities(stats) : [];
+    res.json({ stats, chart, conseils });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/marketing/chat', async (req, res, next) => {
+  try {
+    const { question, history = [] } = req.body || {};
+    if (!question?.trim()) {
+      return res.status(400).json({ message: 'Question requise.' });
+    }
+    const applications = await loadApplicationsForMarketing();
+    const stats = buildMarketingStats(applications);
+    const answer = await askMarketingQuestion(stats, question.trim(), history);
+    res.json({ answer });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/marketing/generate', async (req, res, next) => {
+  try {
+    const { prompt, templateKey } = req.body || {};
+    const applications = await loadApplicationsForMarketing();
+    const stats = buildMarketingStats(applications);
+    const result = await generateMarketingContent({ prompt, templateKey, stats });
+    res.json(result);
   } catch (e) {
     next(e);
   }

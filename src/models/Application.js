@@ -14,7 +14,7 @@ const ApplicationSchema = new mongoose.Schema(
     },
     appliedDate: { type: Date },
     notes: { type: String },
-    documents: [{ name: String, url: String }],
+    documents: [{ name: String, url: String, documentId: String, storageKey: String }],
     contactPerson: { name: String, email: String, phone: String },
     followUpDate: { type: Date }
   },

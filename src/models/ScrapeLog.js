@@ -10,6 +10,23 @@ const ScrapeLogSchema = new mongoose.Schema(
     skipped: { type: Number, default: 0 },
     byPlatform: { type: Map, of: Number, default: {} },
     message: { type: String, default: '' },
+    skipReasons: { type: Map, of: Number, default: {} },
+    skippedItems: {
+      type: [
+        {
+          reasonKey: { type: String, default: '' },
+          title: { type: String, default: '' },
+          description: { type: String, default: '' },
+          source: { type: String, default: '' },
+          organization: { type: String, default: '' },
+          platform: { type: String, default: '' },
+          date: { type: Date },
+          url: { type: String, default: '' },
+          score: { type: Number, default: null }
+        }
+      ],
+      default: []
+    },
     triggeredBy: { type: String, default: 'cron' }
   },
   { timestamps: true }

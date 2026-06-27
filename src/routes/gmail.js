@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authMiddleware, attachUser } from '../middleware/auth.js';
 import { getGmailConfigDiagnostics, isGmailConfigured } from '../config/gmail.js';
+import logger from '../utils/logger.js';
 import {
   archiveMessage,
   buildGmailAuthUrl,
@@ -70,11 +71,33 @@ router.get('/messages', async (req, res, next) => {
   try {
     const status = await getGmailStatus(req.userId);
     if (!status.connected) return res.json({ ...status, messages: [] });
-    const messages = await listMessages(req.userId, {
-      maxResults: req.query.maxResults,
-      labelIds: req.query.labelIds
-    });
-    res.json({ ...status, messages });
+    try {
+      const messages = await listMessages(req.userId, {
+        maxResults: req.query.maxResults,
+        labelIds: req.query.labelIds
+      });
+      res.json({ ...status, messages });
+    } catch (e) {
+      if (e.status === 401 || e.code === 'gmail_auth_expired') {
+        return res.status(401).json({
+          connected: false,
+          configured: status.configured,
+          userEmail: status.userEmail,
+          messages: [],
+          message: e.message || 'Session Gmail expirée. Reconnectez votre compte Gmail.'
+        });
+      }
+      logger.warn('Gmail messages error', {
+        status: e.status,
+        message: e.message,
+        detail: e.gmailDetail
+      });
+      return res.status(e.status || 502).json({
+        ...status,
+        messages: [],
+        message: e.message || 'Impossible de charger les messages Gmail'
+      });
+    }
   } catch (e) {
     next(e);
   }

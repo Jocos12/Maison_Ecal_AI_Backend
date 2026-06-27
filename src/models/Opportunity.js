@@ -16,6 +16,12 @@ const OpportunitySchema = new mongoose.Schema(
       required: true
     },
     location: { type: String },
+    locationStatus: {
+      type: String,
+      enum: ['rdc_confirme', 'a_verifier', 'hors_rdc'],
+      default: 'a_verifier',
+      index: true
+    },
     ville: {
       type: String,
       enum: ['Bukavu', 'Goma', 'Kinshasa', 'Kalemie', 'Lubumbashi', 'RDC', 'Non précisé'],
@@ -33,8 +39,11 @@ const OpportunitySchema = new mongoose.Schema(
     aiAnalysis: {
       est_service: { type: Boolean, default: true },
       est_emploi: { type: Boolean, default: false },
+      type: { type: String, enum: ['service', 'offre_emploi', 'autre'], default: 'service' },
       score: { type: Number, min: 0, max: 100 },
       categorie: { type: String },
+      pays_confirme_rdc: { type: String, enum: ['true', 'false', 'a_verifier'], default: 'a_verifier' },
+      justification: { type: String },
       recommandation: { type: String },
       raison: { type: String },
       ville_confirmee: { type: String },

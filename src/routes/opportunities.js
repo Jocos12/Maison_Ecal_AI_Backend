@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit';
 import Opportunity from '../models/Opportunity.js';
 import { runAllScrapers } from '../scrapers/index.js';
 import { sanitizeSearchParam } from '../services/filterService.js';
+import { reclassifyOpportunities } from '../services/opportunityReclassifyService.js';
 
 const scrapeLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -34,6 +35,8 @@ router.get('/', async (req, res, next) => {
     } = req.query;
 
     const q = {};
+    q.locationStatus = { $ne: 'hors_rdc' };
+    q['aiAnalysis.est_emploi'] = { $ne: true };
     if (category) q.category = category;
     if (platform) q.platform = platform;
     if (isNew === 'true') q.isNew = true;
@@ -81,6 +84,19 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+router.post('/reclassify', scrapeLimiter, async (req, res, next) => {
+  try {
+    if (!['Admin', 'admin'].includes(req.user?.role)) {
+      return res.status(403).json({ message: 'Admin only' });
+    }
+    const useAI = req.body?.useAI === true;
+    const summary = await reclassifyOpportunities({ useAI, dryRun: false, includeArchived: false });
+    res.json(summary);
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.post('/scrape', scrapeLimiter, async (req, res, next) => {
   try {
     if (!['Admin', 'admin'].includes(req.user?.role)) {
@@ -110,6 +126,20 @@ router.patch('/:id/archive', async (req, res, next) => {
     const doc = await Opportunity.findByIdAndUpdate(
       req.params.id,
       { $set: { isArchived: true, isNew: false } },
+      { new: true }
+    );
+    if (!doc) return res.status(404).json({ message: 'Not found' });
+    res.json(doc);
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.patch('/:id/unarchive', async (req, res, next) => {
+  try {
+    const doc = await Opportunity.findByIdAndUpdate(
+      req.params.id,
+      { $set: { isArchived: false, isNew: false } },
       { new: true }
     );
     if (!doc) return res.status(404).json({ message: 'Not found' });

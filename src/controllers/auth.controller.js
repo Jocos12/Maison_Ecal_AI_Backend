@@ -11,10 +11,13 @@ import {
   sendOtpEmail,
   sendWelcomeEmail,
   sendPasswordResetEmail,
+  sendAdminNewSignupEmail,
+  sendAccountApprovedEmail,
   isSmtpConfigured
 } from '../services/email.service.js';
 import logger from '../utils/logger.js';
 import { AUTH_COOKIE_NAME } from '../config/auth.constants.js';
+import { recordLoginActivity } from '../services/loginActivityService.js';
 
 const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || '24h';
 const BCRYPT_ROUNDS = 12;
@@ -57,6 +60,7 @@ function publicUser(user) {
     email: user.email,
     role: user.role,
     isVerified: user.isVerified,
+    isApproved: isUserApproved(user),
     alertsEnabled: user.alertsEnabled,
     alertFrequency: user.alertFrequency,
     keywords: user.keywords,
@@ -64,6 +68,28 @@ function publicUser(user) {
     digestEmail: user.digestEmail,
     preferredLanguage: user.preferredLanguage
   };
+}
+
+function isUserApproved(user) {
+  if (!user) return false;
+  if (user.isApproved === true) return true;
+  if (user.isApproved === false) return false;
+  return user.isVerified === true || ['Admin', 'admin'].includes(user.role);
+}
+
+function pendingApprovalResponse(res, user) {
+  return res.status(403).json({
+    code: 'PENDING_APPROVAL',
+    requiresApproval: true,
+    email: user.email,
+    message:
+      'Votre compte est en attente de validation par un administrateur M-ECAL. Vous recevrez l’accès après approbation.'
+  });
+}
+
+function shouldRequireOtp() {
+  if (process.env.AUTH_REQUIRE_OTP === 'false') return false;
+  return isSmtpConfigured();
 }
 
 async function sendOtpOrFail(email, otp) {
@@ -79,6 +105,28 @@ async function sendOtpOrFail(email, otp) {
   }
 }
 
+async function sendPasswordResetOrFail(email, resetUrl) {
+  const result = await sendPasswordResetEmail(email, resetUrl);
+  if (!result.sent) {
+    throw new Error('SMTP non configuré');
+  }
+}
+
+export async function getMe(req, res, next) {
+  try {
+    if (!req.userId) {
+      return res.json(null);
+    }
+    const user = await User.findById(req.userId).select('-password');
+    if (!user) {
+      return res.json(null);
+    }
+    res.json(user);
+  } catch (e) {
+    next(e);
+  }
+}
+
 export async function signup(req, res, next) {
   try {
     const { name, email, password, confirmPassword, role } = req.body || {};
@@ -91,7 +139,7 @@ export async function signup(req, res, next) {
     if (password.length < 8) {
       return res.status(400).json({ message: 'Le mot de passe doit contenir au moins 8 caractères.' });
     }
-    const allowedRoles = ['Analyste', 'Manager', 'Admin'];
+    const allowedRoles = ['Analyste', 'Manager'];
     const r = allowedRoles.includes(role) ? role : 'Analyste';
 
     const exists = await User.findOne({ email: String(email).toLowerCase().trim() });
@@ -105,26 +153,45 @@ export async function signup(req, res, next) {
       email: String(email).toLowerCase().trim(),
       password: hash,
       role: r,
-      isVerified: false
+      isVerified: false,
+      isApproved: false
     });
 
     const otp = generateOtpDigits();
     user.assignOtp(hashOtp(otp));
     await user.save();
 
+    sendAdminNewSignupEmail({
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      createdAt: user.createdAt
+    }).catch((e) => logger.warn(`Admin signup notify failed: ${e.message}`));
+
     if (isSmtpConfigured()) {
-      await sendWelcomeEmail(user.email, user.name).catch((e) => logger.warn(e.message));
+      await sendWelcomeEmail(user.email, user.name, { pendingApproval: true }).catch((e) =>
+        logger.warn(e.message)
+      );
       await sendOtpOrFail(user.email, otp);
-      return res.status(201).json({ requiresOtp: true, email: user.email });
+      return res.status(201).json({
+        requiresOtp: true,
+        requiresApproval: true,
+        email: user.email,
+        message:
+          'Compte créé. Vérifiez votre e-mail avec le code OTP, puis attendez la validation d’un administrateur.'
+      });
     }
 
-    // Dev: pas d’e-mail → vérifier et connecter directement
     user.isVerified = true;
     user.clearOtp();
     await user.save();
-    const token = signJwt(user);
-    setAuthCookie(res, token);
-    return res.status(201).json({ requiresOtp: false, user: publicUser(user) });
+    return res.status(201).json({
+      requiresOtp: false,
+      requiresApproval: true,
+      email: user.email,
+      message:
+        'Compte créé. Un administrateur M-ECAL doit valider votre inscription avant la première connexion.'
+    });
   } catch (e) {
     next(e);
   }
@@ -145,10 +212,20 @@ export async function login(req, res, next) {
       return res.status(401).json({ message: 'Identifiants invalides.' });
     }
 
-    if (!isSmtpConfigured()) {
+    if (!shouldRequireOtp()) {
+      if (!isUserApproved(user)) {
+        return pendingApprovalResponse(res, user);
+      }
       const token = signJwt(user);
       setAuthCookie(res, token);
+      await recordLoginActivity(req, user, 'login').catch((e) =>
+        logger.warn(`Login activity log failed: ${e.message}`)
+      );
       return res.json({ requiresOtp: false, user: publicUser(user) });
+    }
+
+    if (!isUserApproved(user)) {
+      return pendingApprovalResponse(res, user);
     }
 
     const otp = generateOtpDigits();
@@ -182,8 +259,21 @@ export async function verifyOtp(req, res, next) {
     user.clearOtp();
     await user.save();
 
+    if (!isUserApproved(user)) {
+      return res.status(403).json({
+        code: 'PENDING_APPROVAL',
+        requiresApproval: true,
+        email: user.email,
+        message:
+          'E-mail vérifié. Votre compte attend la validation d’un administrateur M-ECAL avant la connexion.'
+      });
+    }
+
     const token = signJwt(user);
     setAuthCookie(res, token);
+    await recordLoginActivity(req, user, 'login').catch((e) =>
+      logger.warn(`Login activity log failed: ${e.message}`)
+    );
     return res.json({ user: publicUser(user) });
   } catch (e) {
     next(e);
@@ -226,16 +316,38 @@ export async function forgotPassword(req, res, next) {
     if (!email) {
       return res.json(msg);
     }
-    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
-    if (!user || !isSmtpConfigured()) {
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      logger.info(`Forgot password requested for unknown email: ${normalizedEmail}`);
       return res.json(msg);
     }
+
+    if (!isSmtpConfigured()) {
+      logger.warn('Forgot password: SMTP not configured');
+      return res.json(msg);
+    }
+
     const { key, rawToken } = generateResetKeyAndRawToken();
     user.setPasswordReset(key, hashResetToken(rawToken));
     await user.save();
+
     const base = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
     const resetUrl = `${base}/reset-password?key=${encodeURIComponent(key)}&token=${encodeURIComponent(rawToken)}`;
-    await sendPasswordResetEmail(user.email, resetUrl).catch((e) => logger.warn(e.message));
+
+    try {
+      await sendPasswordResetOrFail(user.email, resetUrl);
+      logger.info(`Password reset email sent to ${user.email}`);
+    } catch (e) {
+      user.clearPasswordReset();
+      await user.save();
+      logger.error(`Password reset email failed for ${user.email}: ${e.message}`);
+      if (process.env.NODE_ENV === 'development') {
+        logger.warn(`[DEV] Lien de réinitialisation (email non envoyé): ${resetUrl}`);
+      }
+    }
+
     return res.json(msg);
   } catch (e) {
     next(e);
@@ -269,14 +381,22 @@ export async function resetPassword(req, res, next) {
     user.password = await bcrypt.hash(password, BCRYPT_ROUNDS);
     user.clearPasswordReset();
     await user.save();
+    clearAuthCookie(res);
     return res.json({ message: 'Mot de passe mis à jour.' });
   } catch (e) {
     next(e);
   }
 }
 
-export async function logout(_req, res, next) {
+export async function logout(req, res, next) {
   try {
+    let actor = req.user;
+    if (!actor && req.userId) {
+      actor = await User.findById(req.userId);
+    }
+    if (actor) {
+      await recordLoginActivity(req, actor, 'logout').catch(() => {});
+    }
     clearAuthCookie(res);
     res.json({ ok: true });
   } catch (e) {

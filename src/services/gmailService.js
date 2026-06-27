@@ -97,11 +97,50 @@ export async function getAuthenticatedClient(userId) {
 export async function getGmailStatus(userId) {
   if (!isGmailConfigured()) return { connected: false, configured: false };
   const token = await GmailToken.findOne({ userId }).lean();
-  return {
-    connected: Boolean(token?.accessToken || token?.tokens?.access_token),
-    configured: true,
-    userEmail: token?.userEmail || gmailConfig().user
-  };
+  if (!token) {
+    return { connected: false, configured: true, userEmail: gmailConfig().user };
+  }
+
+  const userEmail = token.userEmail || gmailConfig().user;
+  const hasAccess = Boolean(token.accessToken || token.tokens?.access_token);
+  const hasRefresh = Boolean(token.refreshToken || token.tokens?.refresh_token);
+  const expiry = token.expiryDate ? new Date(token.expiryDate).getTime() : 0;
+  const accessValid = expiry > Date.now() + 60_000;
+
+  if (!hasAccess) {
+    return { connected: false, configured: true, userEmail };
+  }
+  if (accessValid) {
+    return { connected: true, configured: true, userEmail };
+  }
+  if (!hasRefresh) {
+    await clearGmailConnection(userId);
+    return { connected: false, configured: true, userEmail };
+  }
+
+  try {
+    const oauth2 = await getAuthenticatedClient(userId);
+    await oauth2.getAccessToken();
+    return { connected: true, configured: true, userEmail };
+  } catch {
+    await clearGmailConnection(userId);
+    return { connected: false, configured: true, userEmail };
+  }
+}
+
+export async function clearGmailConnection(userId) {
+  await GmailToken.deleteOne({ userId });
+}
+
+async function withGmailAuthRecovery(userId, fn) {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error.code === 'gmail_auth_expired' || error.invalidGrant || error.status === 401) {
+      await clearGmailConnection(userId);
+    }
+    throw error;
+  }
 }
 
 function getHeader(headers = [], name) {
@@ -158,28 +197,47 @@ function extractBody(payload) {
 }
 
 export async function listMessages(userId, { maxResults = 30, labelIds = 'INBOX' } = {}) {
-  const oauth2 = await getAuthenticatedClient(userId);
-  const labels = Array.isArray(labelIds) ? labelIds : String(labelIds).split(',');
-  const list = await gmailApiRequest(oauth2, 'get', '/users/me/messages', {
-    params: { maxResults: Math.min(Number(maxResults) || 30, 30), q: labels.map((label) => `in:${label.toLowerCase()}`).join(' ') }
-  });
+  return withGmailAuthRecovery(userId, async () => {
+    const oauth2 = await getAuthenticatedClient(userId);
+    const labels = Array.isArray(labelIds) ? labelIds : String(labelIds || 'INBOX').split(',').filter(Boolean);
+    const limit = Math.min(Math.max(Number(maxResults) || 30, 1), 30);
 
-  const messages = [];
-  const batchSize = 5;
-  const ids = list.messages || [];
-  for (let index = 0; index < ids.length; index += batchSize) {
-    const batch = ids.slice(index, index + batchSize);
-    const details = await Promise.all(
-      batch.map(async (msg) => {
-        const detail = await gmailApiRequest(oauth2, 'get', `/users/me/messages/${msg.id}`, {
-          params: { format: 'metadata' }
-        });
-        return mapMessageSummary(detail, msg);
-      })
-    );
-    messages.push(...details);
-  }
-  return messages;
+    const list = await gmailApiRequest(oauth2, 'get', '/users/me/messages', {
+      params: {
+        maxResults: limit,
+        labelIds: labels
+      }
+    });
+
+    const ids = list.messages || [];
+    if (ids.length === 0) return [];
+
+    const messages = [];
+    const batchSize = 5;
+    for (let index = 0; index < ids.length; index += batchSize) {
+      const batch = ids.slice(index, index + batchSize);
+      const details = await Promise.all(
+        batch.map(async (msg) => {
+          try {
+            const detail = await gmailApiRequest(oauth2, 'get', `/users/me/messages/${msg.id}`, {
+              params: {
+                format: 'metadata',
+                metadataHeaders: ['From', 'To', 'Subject', 'Date']
+              }
+            });
+            return mapMessageSummary(detail, msg);
+          } catch {
+            const detail = await gmailApiRequest(oauth2, 'get', `/users/me/messages/${msg.id}`, {
+              params: { format: 'full' }
+            });
+            return mapMessageSummary(detail, msg);
+          }
+        })
+      );
+      messages.push(...details);
+    }
+    return messages;
+  });
 }
 
 export async function getMessage(userId, id, format = 'full') {
