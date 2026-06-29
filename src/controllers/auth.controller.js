@@ -25,8 +25,8 @@ const BCRYPT_ROUNDS = 12;
 function cookieOptions() {
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    secure: true,
+    sameSite: 'none',
     maxAge: 24 * 60 * 60 * 1000,
     path: '/'
   };
@@ -45,12 +45,8 @@ function setAuthCookie(res, token) {
 }
 
 function clearAuthCookie(res) {
-  res.clearCookie(AUTH_COOKIE_NAME, {
-    path: '/',
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production'
-  });
+  const { maxAge, ...opts } = cookieOptions();
+  res.clearCookie(AUTH_COOKIE_NAME, opts);
 }
 
 function publicUser(user) {
