@@ -1,3 +1,4 @@
+import './tlsTrust.js';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -31,6 +32,7 @@ if (process.env.NODE_ENV !== 'production') {
     file: loadedFrom || 'aucun .env trouvé',
     gmailClientId: id ? (id.startsWith('REMPLACER_') ? 'placeholder' : 'ok') : 'missing',
     gmailSecret: process.env.GMAIL_CLIENT_SECRET ? 'ok' : 'missing',
+    openai: process.env.OPENAI_API_KEY?.trim() ? `${String(process.env.OPENAI_API_KEY).trim().slice(0, 8)}...` : 'missing',
     anthropic: aiKey('ANTHROPIC_API_KEY'),
     groq: aiKey('GROQ_API_KEY'),
     gemini: aiKey('GEMINI_API_KEY')

@@ -45,7 +45,8 @@ export function formatJobForClient(job) {
     sourceUrl: job.sourceUrl || '',
     platform: job.platform || NON_PRECISE,
     source: job.source || '',
-    verified: Boolean(job.sourceUrl)
+    verified: Boolean(job.sourceUrl) && !/^voir les offres/i.test(job.title || ''),
+    isManualLink: /^voir les offres/i.test(job.title || '')
   };
 }
 

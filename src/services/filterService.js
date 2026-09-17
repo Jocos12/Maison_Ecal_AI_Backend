@@ -6,6 +6,7 @@ import {
   hasAiProviders,
   isEligibleForAiReview,
   isJobPosting,
+  isNotATender,
   isRdcTrustedPlatform,
   MECAL_CATEGORY_KEYWORDS,
   NON_LOGISTICS_EXCLUSIONS,
@@ -23,6 +24,18 @@ export function analyzeOpportunity(
   const blob = `${title}\n${description}\n${organization}\n${location}`;
   const trustedRdcSource = isRdcTrustedPlatform(platform);
 
+  if (isNotATender(title)) {
+    return {
+      accept: false,
+      reason: 'not_a_tender',
+      rawKeywords: [],
+      category: null,
+      locationStatus: null,
+      type: 'autre',
+      needsAiReview: false
+    };
+  }
+
   if (isJobPosting(blob)) {
     const jobHits = findKeywordMatches(blob, EXCLUDE_KEYWORDS);
     return {
@@ -36,7 +49,7 @@ export function analyzeOpportunity(
     };
   }
 
-  if (includesAny(blob, NON_LOGISTICS_EXCLUSIONS)) {
+  if (includesAny(blob, NON_LOGISTICS_EXCLUSIONS) && classifyMecalCategory(blob) === null) {
     return {
       accept: false,
       reason: 'non_logistics',
@@ -79,10 +92,10 @@ export function analyzeOpportunity(
     };
   }
 
-  if (hasAiProviders() && isEligibleForAiReview(blob) && trustedRdcSource) {
+  if (trustedRdcSource && isEligibleForAiReview(blob)) {
     return {
       accept: true,
-      reason: 'needs_ai_review',
+      reason: hasAiProviders() ? 'needs_ai_review' : 'trusted_rdc_procurement',
       rawKeywords: [],
       category: null,
       ville,
@@ -106,4 +119,28 @@ export function analyzeOpportunity(
 export function sanitizeSearchParam(q) {
   if (q == null) return '';
   return String(q).replace(/[^\p{L}\p{N}\s\-_.]/gu, '').slice(0, 120);
+}
+
+const RDC_NATIVE_PLATFORMS = new Set(['ARSP', 'SIGMAP', 'ProfilRDC', 'AchatPublicRDC']);
+
+/** Offres affichables comme « logistique RDC » (même analyse que l’ingest, rejouée sur le stock). */
+export function passesMecalListingFilter(opp = {}) {
+  if (opp.isArchived) return false;
+  if (opp.locationStatus === 'hors_rdc') return false;
+  if (opp.aiAnalysis?.est_emploi === true || opp.aiAnalysis?.type === 'offre_emploi') return false;
+
+  const analysis = analyzeOpportunity({
+    title: opp.title || '',
+    description: opp.description || '',
+    organization: opp.organization || '',
+    location: [opp.location, opp.ville].filter(Boolean).join(' '),
+    platform: opp.platform || ''
+  });
+
+  if (!analysis.accept) return false;
+  if (analysis.locationStatus === 'hors_rdc') return false;
+  if (analysis.type === 'offre_emploi') return false;
+
+  if (RDC_NATIVE_PLATFORMS.has(opp.platform)) return true;
+  return Boolean(analysis.category);
 }

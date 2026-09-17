@@ -43,10 +43,10 @@ export const DEFAULT_SOURCES = [
   {
     key: 'AfDB',
     name: 'African Development Bank Tenders',
-    url: 'https://www.afdb.org/en/about-us/corporate-procurement',
-    scraperKey: null,
-    description: 'Avis d’appels d’offres BAD.',
-    enabled: false
+    url: 'https://www.afdb.org/en/documents/project-related-procurement/procurement-notices',
+    scraperKey: 'AfDB',
+    description: 'Avis d’acquisition BAD (RSS + notices) filtrés RDC / DRC.',
+    enabled: true
   },
   {
     key: 'UNGM',
@@ -87,9 +87,9 @@ export const ADDITIONAL_VEILLE_SOURCES = [
     url: 'https://www.devex.com',
     scraperKey: 'DevExVeille',
     description:
-      'Funding Devex filtré RDC (DRC/RDC) — logistique, transport, supply chain, consultance. FR/EN. Fréquence 12h.',
+      'Funding Devex — paywall Devex Pro (0 résultat sans abonnement). Désactivé par défaut.',
     frequencyHours: 12,
-    enabled: true
+    enabled: false
   },
   {
     key: 'UNGMVeille',
@@ -104,11 +104,29 @@ export const ADDITIONAL_VEILLE_SOURCES = [
   {
     key: 'AfDBVeille',
     name: 'African Development Bank — Projets RDC',
-    url: 'https://www.afdb.org/en/projects-and-operations/procurement',
+    url: 'https://www.afdb.org/en/documents/project-related-procurement/procurement-notices',
     scraperKey: 'AfDBVeille',
     description:
-      'Marchés BAD — projets RDC, infrastructure, transport et logistique. Fréquence 12h.',
+      'Même corpus que African Development Bank Tenders (avis RDC). Fréquence 12h.',
     frequencyHours: 12,
+    enabled: true
+  },
+  {
+    key: 'SIGMAP',
+    name: 'SIGMAP — Marché public RDC',
+    url: 'https://marchepublic.cd/',
+    scraperKey: 'SIGMAP',
+    description: 'Portail SIGMAP (marchepublic.cd) — avis d’appel d’offres et AMI RDC.',
+    frequencyHours: 3,
+    enabled: true
+  },
+  {
+    key: 'ARSP',
+    name: 'ARSP — Appels d’offres RDC',
+    url: 'https://appeldoffre.arsp.cd/',
+    scraperKey: 'ARSP',
+    description: 'Appels d’offres ARSP avec date d’expiration réelle (En cours / Expiré).',
+    frequencyHours: 3,
     enabled: true
   },
   {
@@ -137,10 +155,29 @@ export async function ensureDefaultSources() {
   for (const source of [...DEFAULT_SOURCES, ...ADDITIONAL_VEILLE_SOURCES]) {
     await Source.updateOne(
       { key: source.key },
-      { $setOnInsert: { enabled: true, frequencyHours: 12, ...source } },
+      { $setOnInsert: { enabled: source.enabled !== false, frequencyHours: source.frequencyHours || 12, ...source } },
       { upsert: true }
     );
   }
+  await Source.updateOne(
+    { key: 'AfDB' },
+    {
+      $set: {
+        enabled: true,
+        scraperKey: 'AfDB',
+        url: 'https://www.afdb.org/en/documents/project-related-procurement/procurement-notices',
+        description: 'Avis d’acquisition BAD (RSS + notices) filtrés RDC / DRC.'
+      }
+    }
+  );
+  await Source.updateOne(
+    { key: 'DevEx' },
+    { $set: { enabled: false } }
+  );
+  await Source.updateOne(
+    { key: 'DevExVeille' },
+    { $set: { enabled: false } }
+  );
 }
 
 export async function getActiveScraperKeys() {

@@ -59,7 +59,12 @@ export const UNGM_LOGISTICS_KEYWORDS = [
   'humanitarian logistics',
   'cargo',
   'cold chain',
-  'chaîne du froid'
+  'chaîne du froid',
+  'aircraft',
+  'airlift',
+  'air transportation',
+  'refrigerated',
+  'heavy cargo'
 ];
 
 export const AFDB_VEILLE_KEYWORDS = [
@@ -114,4 +119,9 @@ export function filterUngmLogisticsVeilleItems(items = []) {
 
 export function filterAfdbVeilleItems(items = []) {
   return filterVeilleItems(items, { categoryKeywords: AFDB_VEILLE_KEYWORDS, requireRdc: true });
+}
+
+/** Notices already harvested from a DRC country listing — keep consulting/procurement, drop empty titles. */
+export function filterAfdbDrcListingItems(items = []) {
+  return (items || []).filter((item) => String(item.title || '').trim().length >= 18);
 }

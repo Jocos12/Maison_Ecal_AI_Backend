@@ -3,33 +3,48 @@ import Application from '../models/Application.js';
 import Source from '../models/Source.js';
 import User from '../models/User.js';
 import { listMessages } from '../services/gmailService.js';
+import { activeOpportunityFilter } from './opportunityLifecycle.js';
 
 function countUnread(messages = []) {
   return messages.filter((m) => m.unread || m.isRead === false).length;
 }
 
 export async function getAgentSystemSnapshot(userId) {
+  const active = activeOpportunityFilter();
+  const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
   const [
     totalActive,
     totalArchived,
     applications,
     sources,
     platformAgg,
+    categoryAgg,
+    recommendedCount,
+    last14Days,
     recentOpportunities,
     user,
     pendingUsers
   ] = await Promise.all([
-    Opportunity.countDocuments({ isArchived: false }),
+    Opportunity.countDocuments(active),
     Opportunity.countDocuments({ isArchived: true }),
     Application.find().populate('opportunity').sort({ updatedAt: -1 }).limit(50).lean(),
     Source.find().lean(),
     Opportunity.aggregate([
-      { $match: { isArchived: false } },
+      { $match: active },
       { $group: { _id: '$platform', count: { $sum: 1 } } },
       { $sort: { count: -1 } }
     ]),
-    Opportunity.find({ isArchived: false })
-      .sort({ createdAt: -1 })
+    Opportunity.aggregate([
+      { $match: active },
+      { $group: { _id: '$category', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]),
+    Opportunity.countDocuments(activeOpportunityFilter({ isRecommended: true })),
+    Opportunity.countDocuments({
+      $and: [active, { createdAt: { $gte: twoWeeksAgo } }]
+    }),
+    Opportunity.find(active)
+      .sort({ isRecommended: -1, aiRelevanceScore: -1, deadline: 1 })
       .limit(80)
       .lean(),
     User.findById(userId).select('name email role alertsEnabled').lean(),
@@ -59,7 +74,16 @@ export async function getAgentSystemSnapshot(userId) {
     count: p.count
   }));
 
+  const categories = categoryAgg.map((c) => ({
+    name: c._id || 'sans catégorie',
+    count: c.count
+  }));
+
   const enabledSources = sources.filter((s) => s.enabled !== false);
+
+  const appliedSet = new Set(
+    applications.map((a) => String(a.opportunity?._id || a.opportunity || '')).filter(Boolean)
+  );
 
   return {
     stats: {
@@ -68,9 +92,12 @@ export async function getAgentSystemSnapshot(userId) {
       applicationsTotal: applications.length,
       sourcesActive: enabledSources.length,
       sourcesTotal: sources.length,
-      pendingUserApprovals: pendingUsers
+      pendingUserApprovals: pendingUsers,
+      recommended: recommendedCount,
+      last14Days
     },
     platforms,
+    categories,
     sources: enabledSources.map((s) => ({
       name: s.name || s.platform,
       platform: s.platform,
@@ -89,8 +116,15 @@ export async function getAgentSystemSnapshot(userId) {
       platform: o.platform,
       ville: o.ville,
       deadline: o.deadline,
+      postedDate: o.postedDate || o.firstSeenAt || o.createdAt,
+      isRecommended: Boolean(o.isRecommended),
+      category: o.category,
       score: o.aiAnalysis?.score ?? o.aiRelevanceScore,
-      sourceUrl: o.sourceUrl
+      sourceUrl: o.sourceUrl,
+      hasApplication: appliedSet.has(String(o._id)),
+      daysToDeadline: o.deadline
+        ? Math.ceil((new Date(o.deadline).getTime() - Date.now()) / 86400000)
+        : null
     }))
   };
 }

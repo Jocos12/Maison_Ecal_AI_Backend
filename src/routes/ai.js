@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import Opportunity from '../models/Opportunity.js';
 import { generateCommercialProposal, generateMarketingSuggestions, generateMotivationLetter, suggestEmailReplies } from '../services/aiClassifierService.js';
+import { stripMarkdown } from '../utils/stripMarkdown.js';
 import {
   analyzeOpportunities,
   askMarketingQuestion,
@@ -10,6 +11,9 @@ import {
   loadApplicationsForMarketing
 } from '../services/marketingAnalysisService.js';
 import { callAIWithFallback, getProvidersStatus, testAllProviders } from '../services/aiService.js';
+import { getAiRuntimeHealth } from '../services/aiRuntimeHealth.js';
+import { getJobAssistantProfile } from '../services/jobAssistantProfileService.js';
+import { handleOpportunityAsk } from '../services/opportunityAskService.js';
 import SystemSetting from '../models/SystemSetting.js';
 
 const router = Router();
@@ -25,7 +29,8 @@ export async function handleAiStatus(_req, res) {
   res.json({
     providers,
     totalAvailable,
-    message: totalAvailable === 0 ? 'Aucun provider IA disponible' : `${totalAvailable}/3 providers IA actifs`
+    runtime: getAiRuntimeHealth(),
+    message: totalAvailable === 0 ? 'Aucun provider IA disponible' : `${totalAvailable}/4 providers IA actifs`
   });
 }
 
@@ -64,8 +69,8 @@ export async function handleAiDebug(_req, res) {
       groq_key: mask(process.env.GROQ_API_KEY),
       gemini_key: mask(process.env.GEMINI_API_KEY),
       claude_key: mask(process.env.ANTHROPIC_API_KEY),
-      groq_model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-      gemini_model: process.env.GEMINI_MODEL || 'gemini-2.0-flash'
+      groq_model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
+      gemini_model: process.env.GEMINI_MODEL || 'gemini-3.6-flash'
     },
     tests: await testAllProviders()
   };
@@ -75,11 +80,29 @@ export async function handleAiDebug(_req, res) {
 
 router.get('/debug', handleAiDebug);
 
+async function getCombinedProfile(userId) {
+  const company = (await getProfile()) || {};
+  let cv = {};
+  let cvFileName = '';
+  if (userId) {
+    try {
+      const job = await getJobAssistantProfile(userId);
+      cv = job.profile || {};
+      cvFileName = job.cv?.fileName || '';
+    } catch {
+      /* profil CV optionnel */
+    }
+  }
+  return { ...company, ...cv, cvFileName };
+}
+
+router.post('/opportunities/:id/ask', handleOpportunityAsk);
+
 router.post('/opportunities/:id/letter', async (req, res, next) => {
   try {
     const opp = await Opportunity.findById(req.params.id).lean();
     if (!opp) return res.status(404).json({ message: 'Opportunité introuvable.' });
-    const letter = await generateMotivationLetter(opp, await getProfile());
+    const letter = stripMarkdown(await generateMotivationLetter(opp, await getCombinedProfile(req.userId)));
     res.json({ letter });
   } catch (e) {
     next(e);
@@ -90,7 +113,7 @@ router.post('/opportunities/:id/proposal', async (req, res, next) => {
   try {
     const opp = await Opportunity.findById(req.params.id).lean();
     if (!opp) return res.status(404).json({ message: 'Opportunité introuvable.' });
-    const proposal = await generateCommercialProposal(opp, await getProfile());
+    const proposal = await generateCommercialProposal(opp, await getCombinedProfile(req.userId));
     res.json({ proposal, format: 'markdown' });
   } catch (e) {
     next(e);

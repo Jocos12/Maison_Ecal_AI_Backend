@@ -45,7 +45,7 @@ function buildSourceMessage(name, result) {
   }
   if (result.status === 'error') {
     if (result.error === '403') {
-      return `${label} indisponible (appname non approuvé — configurez RELIEFWEB_APPNAME)`;
+      return `${label} indisponible — appname non encore approuvé par ReliefWeb (demande : https://apidoc.reliefweb.int/parameters)`;
     }
     if (result.error === 'robots_txt_disallow') {
       return result.message || `${label} indisponible (robots.txt interdit le scraping)`;

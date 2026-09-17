@@ -3,7 +3,8 @@ import ScrapeLog from '../models/ScrapeLog.js';
 import Source from '../models/Source.js';
 import {
   getSkipCategoryAdvice,
-  rejectReasonLabel,
+  getSkipCategoryInsights,
+  enrichSkippedOffer,
   SKIP_REASON_LABELS
 } from '../services/agentSkipAdviceService.js';
 import { getAgentSystemSnapshot } from '../services/agentContextService.js';
@@ -11,16 +12,7 @@ import { getAgentSystemSnapshot } from '../services/agentContextService.js';
 const router = Router();
 
 function mapSkippedItem(item) {
-  return {
-    title: item.title,
-    source: item.source || item.platform || item.organization || 'Inconnue',
-    date: item.date ? new Date(item.date).toLocaleDateString('fr-FR') : '',
-    score: item.score,
-    rejectReason: rejectReasonLabel(item.reasonKey),
-    reasonKey: item.reasonKey,
-    description: item.description || '',
-    url: item.url || ''
-  };
+  return enrichSkippedOffer(item);
 }
 
 router.get('/context', async (req, res, next) => {
@@ -44,7 +36,7 @@ router.get('/status', async (_req, res, next) => {
       activeSources,
       lastSearchAt: lastLog?.startedAt || null,
       lastSummary: lastLog || null,
-      schedules: ['0 */6 * * *', '0 */12 * * *', '0 0 * * *']
+      schedules: [process.env.SCRAPE_CRON || '*/30 * * * *', '*/15 * * * *', '0 6 * * *']
     });
   } catch (e) {
     next(e);
@@ -109,6 +101,34 @@ router.post('/logs/:id/skip-advice', async (req, res, next) => {
       offers,
       userMessage: message.trim(),
       history
+    });
+
+    res.json({ reply });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/logs/:id/skip-insights', async (req, res, next) => {
+  try {
+    const { reasonKey } = req.body || {};
+    if (!reasonKey) return res.status(400).json({ message: 'reasonKey requis' });
+
+    const log = await ScrapeLog.findById(req.params.id).lean();
+    if (!log) return res.status(404).json({ message: 'Collecte introuvable' });
+
+    const offers = (log.skippedItems || [])
+      .filter((item) => item.reasonKey === reasonKey)
+      .map(mapSkippedItem);
+
+    const categoryLabel = SKIP_REASON_LABELS[reasonKey] || reasonKey;
+    const logDate = log.startedAt ? new Date(log.startedAt).toLocaleString('fr-FR') : '';
+
+    const { reply } = await getSkipCategoryInsights({
+      categoryLabel,
+      count: log.skipReasons?.[reasonKey] ?? offers.length,
+      logDate,
+      offers
     });
 
     res.json({ reply });

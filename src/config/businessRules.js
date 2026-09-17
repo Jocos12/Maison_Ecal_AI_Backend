@@ -37,7 +37,11 @@ export const SERVICES_INCLUS = [
   'logistic training',
   'logistics training',
   'logistics consulting',
-  'supply chain',
+  'supply chain consulting',
+  'supply chain consultancy',
+  'consultance supply chain',
+  'conseil supply chain',
+  'conseil en supply chain',
   'chaine d approvisionnement',
   'chaine logistique',
   'gestion des stocks',
@@ -48,7 +52,10 @@ export const SERVICES_INCLUS = [
   'acheminement',
   'prestation logistique',
   'service logistique',
-  'mission logistique'
+  'mission logistique',
+  'transport de marchandises',
+  'fleet management',
+  'gestion de flotte'
 ];
 
 /** Mots-clés par catégorie M-ECAL (une seule catégorie logistique doit matcher). */
@@ -123,7 +130,11 @@ export const MECAL_CATEGORY_KEYWORDS = {
     'logistics consultancy',
     'logistics consulting',
     'logistic consultancy',
-    'supply chain',
+    'supply chain consulting',
+    'supply chain consultancy',
+    'consultance supply chain',
+    'conseil supply chain',
+    'conseil en supply chain',
     'chaine d approvisionnement',
     'chaine logistique',
     'gestion des stocks',
@@ -133,12 +144,16 @@ export const MECAL_CATEGORY_KEYWORDS = {
     'gestion entrepot',
     'warehouse management',
     'distribution logistique',
-    'acheminement',
     'prestation logistique',
     'service logistique',
     'mission logistique',
     'appui en logistique',
-    'support logistique'
+    'support logistique',
+    'transport de marchandises',
+    'transport de biens',
+    'freight forwarding',
+    'fleet management',
+    'gestion de flotte'
   ]
 };
 
@@ -241,6 +256,11 @@ export const PROCUREMENT_FIRM_SIGNALS = [
   'recrutement d une societe',
   "recrutement d'une société",
   'recrutement d un prestataire',
+  "recrutement d'un prestataire",
+  'recrutement d une entreprise',
+  "recrutement d'une entreprise",
+  'recrutement d une agence',
+  "recrutement d'une agence",
   'selection d une firme',
   'selection d un cabinet',
   'manifestation d interet',
@@ -401,6 +421,11 @@ export const NON_RDC_COUNTRY_KEYWORDS = [
   'mogadishu',
   'haiti',
   'haïti',
+  'latin america',
+  'amerique latine',
+  'amérique latine',
+  'dominican republic',
+  'republique dominicaine',
   'port-au-prince',
   'afghanistan',
   'syria',
@@ -454,11 +479,14 @@ export const NON_RDC_COUNTRY_KEYWORDS = [
 export const RDC_TRUSTED_PLATFORMS = new Set([
   'ProfilRDC',
   'AchatPublicRDC',
+  'SIGMAP',
+  'ARSP',
   'ReliefWeb',
   'UNGM',
   'UNGMVeille',
   'DevEx',
   'DevExVeille',
+  'AfDB',
   'AfDBVeille',
   'MediaCongo',
   'UNjobnet',
@@ -556,12 +584,69 @@ export function normalizeText(value = '') {
   return String(value)
     .toLowerCase()
     .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '');
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[\u2018\u2019\u201A\u2032\uFF07`]/g, "'");
+}
+
+/** Titres ReliefWeb / clusters : bulletins, pas des marchés. */
+export const NOT_A_TENDER_TITLE_SIGNALS = [
+  'situation report',
+  'situation reports',
+  'sitrep',
+  'situation update',
+  'situation updates',
+  'external situation report',
+  'flash update',
+  'weekly update',
+  'rapport de situation',
+  'bulletin de situation'
+];
+
+/** True if the title is a sitrep / bulletin, not a tender a firm can bid on. */
+export function isNotATender(title = '') {
+  const t = normalizeText(title);
+  if (!t) return false;
+  if (includesAny(t, NOT_A_TENDER_TITLE_SIGNALS)) return true;
+  if (/\bsitrep\b/.test(t)) return true;
+  if (/\bmonitor\b/.test(t)) return true;
+  return false;
 }
 
 export function includesAny(text, keywords) {
   const normalized = normalizeText(text);
   return keywords.some((keyword) => normalized.includes(normalizeText(keyword)));
+}
+
+/** Overlay persisté (mots-clés extra / retirés / suivi) — n'altère pas MECAL_CATEGORY_KEYWORDS. */
+let categoryRuntime = {};
+
+export function setCategoryRuntimeOverlay(map = {}) {
+  categoryRuntime = map && typeof map === 'object' ? map : {};
+}
+
+export function getCategoryRuntimeOverlay() {
+  return categoryRuntime;
+}
+
+export function getEffectiveMecalKeywords(slug) {
+  const base = MECAL_CATEGORY_KEYWORDS[slug] || [];
+  const o = categoryRuntime[slug] || {};
+  const removed = new Set((o.removedKeywords || []).map((k) => normalizeText(k)).filter(Boolean));
+  const seen = new Set();
+  const out = [];
+  for (const k of [...base, ...(o.extraKeywords || [])]) {
+    const n = normalizeText(k);
+    if (!n || removed.has(n) || seen.has(n)) continue;
+    seen.add(n);
+    out.push(String(k).trim());
+  }
+  return out;
+}
+
+export function getCategoryTeamNotes() {
+  return Object.entries(categoryRuntime)
+    .filter(([, v]) => String(v?.description || '').trim())
+    .map(([slug, v]) => `- ${slug}: ${String(v.description).trim().slice(0, 400)}`);
 }
 
 export function findKeywordMatches(text, keywords) {
@@ -572,15 +657,32 @@ export function findKeywordMatches(text, keywords) {
 export function isFirmProcurement(text = '') {
   const normalized = normalizeText(text);
   if (includesAny(normalized, PROCUREMENT_FIRM_SIGNALS)) return true;
-  if (/recrutement d[' ]?(une|un)\s+(firme|cabinet|societe|prestataire|bureau)/.test(normalized)) return true;
-  if (/selection d[' ]?(une|un)\s+(firme|cabinet|societe|prestataire)/.test(normalized)) return true;
+  if (
+    /recrutement d[' ]?(une|un)\s+(firme|cabinet|societe|entreprise|prestataire|bureau|agence)/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  if (/selection d[' ]?(une|un)\s+(firme|cabinet|societe|entreprise|prestataire|bureau|agence)/.test(normalized)) {
+    return true;
+  }
   if (includesAny(normalized, SERVICE_INCLUSION_SIGNALS)) return true;
+  if (/\b(ami|eoi|ifb|spn|ncb|icb)\b/.test(normalized)) return true;
   return false;
 }
 
 export function isJobPosting(text = '') {
   const normalized = normalizeText(text);
+  // Marché de firme / prestataire : jamais un emploi salarié.
   if (isFirmProcurement(text)) return false;
+  if (
+    /recrutement d[' ]?(une|un)\s+(firme|cabinet|societe|entreprise|prestataire|bureau|agence)\b/.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
   if (includesAny(normalized, JOB_TITLE_EXCLUSIONS)) return true;
   if (/\b(assistant|officier|manager|responsable|magasinier|superviseur|coordinateur|directeur)\s+(de\s+)?logistique\b/.test(normalized)) {
     return true;
@@ -612,8 +714,6 @@ export function isEligibleForAiReview(text = '') {
  */
 export function classifyMecalCategory(text = '') {
   const normalized = normalizeText(text);
-  if (includesAny(normalized, NON_LOGISTICS_EXCLUSIONS)) return null;
-
   const order = [
     'formation_chauffeurs',
     'formation',
@@ -624,10 +724,12 @@ export function classifyMecalCategory(text = '') {
   ];
 
   for (const slug of order) {
-    const keywords = MECAL_CATEGORY_KEYWORDS[slug] || [];
+    if (categoryRuntime[slug]?.enabled === false) continue;
+    const keywords = getEffectiveMecalKeywords(slug);
     if (includesAny(normalized, keywords)) return slug;
   }
 
+  if (includesAny(normalized, NON_LOGISTICS_EXCLUSIONS)) return null;
   return null;
 }
 

@@ -8,6 +8,10 @@ const ScrapeLogSchema = new mongoose.Schema(
     totalRaw: { type: Number, default: 0 },
     saved: { type: Number, default: 0 },
     skipped: { type: Number, default: 0 },
+    archivedExpired: { type: Number, default: 0 },
+    archivedStale: { type: Number, default: 0 },
+    archivedTotal: { type: Number, default: 0 },
+    sourcesScanned: { type: Number, default: 0 },
     byPlatform: { type: Map, of: Number, default: {} },
     message: { type: String, default: '' },
     skipReasons: { type: Map, of: Number, default: {} },
@@ -27,7 +31,29 @@ const ScrapeLogSchema = new mongoose.Schema(
       ],
       default: []
     },
-    triggeredBy: { type: String, default: 'cron' }
+    triggeredBy: { type: String, default: 'cron' },
+    aiProvider: { type: String, default: '' },
+    aiProviders: { type: Map, of: Number, default: {} },
+    recommendedCount: { type: Number, default: 0 },
+    scoredCount: { type: Number, default: 0 },
+    filterRetentionPct: { type: Number, default: null },
+    relevancePct: { type: Number, default: null },
+    globalRelevancePct: { type: Number, default: null },
+    skipReasonPercents: { type: Map, of: Number, default: {} },
+    errors: {
+      type: [
+        {
+          source: { type: String, default: '' },
+          message: { type: String, default: '' }
+        }
+      ],
+      default: []
+    },
+    failureKind: {
+      type: String,
+      enum: ['', 'orphan_restart', 'timeout', 'pipeline'],
+      default: ''
+    }
   },
   { timestamps: true }
 );

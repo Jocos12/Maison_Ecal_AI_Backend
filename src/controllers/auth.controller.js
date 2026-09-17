@@ -13,7 +13,7 @@ import {
   sendPasswordResetEmail,
   sendAdminNewSignupEmail,
   sendAccountApprovedEmail,
-  isSmtpConfigured
+  isEmailDeliveryConfigured
 } from '../services/email.service.js';
 import logger from '../utils/logger.js';
 import { AUTH_COOKIE_NAME } from '../config/auth.constants.js';
@@ -85,7 +85,7 @@ function pendingApprovalResponse(res, user) {
 
 function shouldRequireOtp() {
   if (process.env.AUTH_REQUIRE_OTP === 'false') return false;
-  return isSmtpConfigured();
+  return isEmailDeliveryConfigured();
 }
 
 async function sendOtpOrFail(email, otp) {
@@ -94,9 +94,12 @@ async function sendOtpOrFail(email, otp) {
   } catch (e) {
     logger.error(`OTP email delivery failed for ${email}: ${e.message}`);
     const err = new Error(
-      "Impossible d'envoyer le code OTP pour le moment. Vérifiez la configuration SMTP puis réessayez."
+      "Impossible d'envoyer le code OTP pour le moment. Vérifiez la configuration e-mail puis réessayez."
     );
     err.status = 502;
+    err.hint =
+      e.message ||
+      'SMTP App Password rejeté, ou Gmail OAuth non connecté. Ouvrez /api/gmail/system-connect avec le compte GMAIL_USER.';
     throw err;
   }
 }
@@ -164,7 +167,7 @@ export async function signup(req, res, next) {
       createdAt: user.createdAt
     }).catch((e) => logger.warn(`Admin signup notify failed: ${e.message}`));
 
-    if (isSmtpConfigured()) {
+    if (isEmailDeliveryConfigured()) {
       await sendWelcomeEmail(user.email, user.name, { pendingApproval: true }).catch((e) =>
         logger.warn(e.message)
       );
@@ -289,7 +292,7 @@ export async function resendOtp(req, res, next) {
       const wait = Math.ceil(60 - (now - new Date(user.lastOtpSentAt).getTime()) / 1000);
       return res.status(429).json({ message: `Patientez ${wait}s avant de renvoyer.` });
     }
-    if (!isSmtpConfigured()) {
+    if (!isEmailDeliveryConfigured()) {
       return res.status(503).json({ message: 'Envoi d’e-mail non configuré.' });
     }
     const otp = generateOtpDigits();
@@ -320,8 +323,8 @@ export async function forgotPassword(req, res, next) {
       return res.json(msg);
     }
 
-    if (!isSmtpConfigured()) {
-      logger.warn('Forgot password: SMTP not configured');
+    if (!isEmailDeliveryConfigured()) {
+      logger.warn('Forgot password: e-mail delivery not configured');
       return res.json(msg);
     }
 

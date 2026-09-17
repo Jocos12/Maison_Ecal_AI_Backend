@@ -1,35 +1,84 @@
 import { Router } from 'express';
 import { authMiddleware, attachUser } from '../middleware/auth.js';
-import { getGmailConfigDiagnostics, isGmailConfigured } from '../config/gmail.js';
+import { getGmailConfigDiagnostics, isGmailConfigured, gmailConfig } from '../config/gmail.js';
 import logger from '../utils/logger.js';
 import {
   archiveMessage,
   buildGmailAuthUrl,
+  buildSystemMailAuthUrl,
   deleteMessage,
+  exchangeCodeForSystemMail,
   exchangeCodeForToken,
   getGmailStatus,
   getMessage,
+  getSystemMailStatus,
   listMessages,
   markAsRead,
   replyToMessage,
   saveDraft,
-  sendMessage
+  sendMessage,
+  SYSTEM_MAIL_OAUTH_STATE
 } from '../services/gmailService.js';
 
 const frontendUrl = () => process.env.FRONTEND_URL || 'http://localhost:5173';
 
 const router = Router();
 
+router.get('/system-status', async (_req, res, next) => {
+  try {
+    res.json(await getSystemMailStatus());
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** Connect GMAIL_USER once so OTP / auth e-mails can be sent via Gmail API (no login required). */
+router.get('/system-connect', (req, res, next) => {
+  try {
+    if (!isGmailConfigured()) {
+      return res.status(503).send(
+        'Configuration Gmail OAuth2 manquante. Définissez GMAIL_CLIENT_ID et GMAIL_CLIENT_SECRET dans backend/.env.'
+      );
+    }
+    const cfg = gmailConfig();
+    logger.info('Starting system mail Gmail OAuth', { user: cfg.user });
+    res.redirect(buildSystemMailAuthUrl());
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.get('/callback', async (req, res, next) => {
   const frontend = frontendUrl();
   if (req.query.error) {
+    if (req.query.state === SYSTEM_MAIL_OAUTH_STATE) {
+      return res
+        .status(400)
+        .send(
+          `Connexion mail système refusée: ${req.query.error}. Réessayez via /api/gmail/system-connect.`
+        );
+    }
     return res.redirect(`${frontend}/messaging?gmail_error=${encodeURIComponent(req.query.error)}`);
   }
   try {
+    if (req.query.state === SYSTEM_MAIL_OAUTH_STATE) {
+      const result = await exchangeCodeForSystemMail(req.query.code);
+      return res
+        .status(200)
+        .type('html')
+        .send(`<!DOCTYPE html><html lang="fr"><body style="font-family:system-ui;padding:2rem;background:#0f172a;color:#e2e8f0">
+          <h1 style="color:#22c55e">Mail système connecté</h1>
+          <p>Les e-mails OTP seront envoyés depuis <strong>${result.userEmail}</strong> via l’API Gmail.</p>
+          <p>Vous pouvez fermer cet onglet et vous reconnecter sur M-ECAL.</p>
+        </body></html>`);
+    }
     await exchangeCodeForToken(req.query.code, req.query.state);
     res.redirect(`${frontend}/messaging?gmail=connected`);
   } catch (e) {
     console.error('Erreur callback Gmail:', e.message);
+    if (req.query.state === SYSTEM_MAIL_OAUTH_STATE) {
+      return res.status(500).send(`Échec connexion mail système: ${e.message}`);
+    }
     res.redirect(`${frontend}/messaging?gmail_error=callback_failed`);
   }
 });

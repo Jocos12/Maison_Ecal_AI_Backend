@@ -1,22 +1,41 @@
 import nodemailer from 'nodemailer';
 import User from '../models/User.js';
 import logger from '../utils/logger.js';
+import { isGmailConfigured } from '../config/gmail.js';
+import {
+  isSystemMailReady,
+  sendSystemHtmlEmail,
+  getSystemMailStatus
+} from './gmailService.js';
 
 function parseBool(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
 }
 
+function normalizeSmtpPass(raw) {
+  return String(raw || '').trim().replace(/\s+/g, '');
+}
+
+let smtpPassSpacesWarned = false;
+
 function smtpConfig() {
   const port = Number(process.env.SMTP_PORT || process.env.EMAIL_PORT || 587);
   const rejectUnauthorized = parseBool(process.env.SMTP_TLS_REJECT_UNAUTHORIZED, true);
+  const rawPass = process.env.SMTP_PASS || process.env.EMAIL_PASS || '';
+  if (!smtpPassSpacesWarned && /\s/.test(String(rawPass))) {
+    smtpPassSpacesWarned = true;
+    logger.warn(
+      "SMTP_PASS contient des espaces, ils seront retirés automatiquement (mot de passe d'application Gmail)"
+    );
+  }
   const cfg = {
     host: process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.gmail.com',
     port,
     secure: parseBool(process.env.SMTP_SECURE, port === 465),
     auth: {
       user: process.env.SMTP_USER || process.env.EMAIL_USER,
-      pass: process.env.SMTP_PASS || process.env.EMAIL_PASS
+      pass: normalizeSmtpPass(rawPass)
     }
   };
 
@@ -32,14 +51,59 @@ export function isSmtpConfigured() {
   return Boolean(c.auth.user && c.auth.pass);
 }
 
+/** True when OTP / auth e-mails can be attempted (SMTP password and/or Gmail OAuth). */
+export function isEmailDeliveryConfigured() {
+  return isSmtpConfigured() || isGmailConfigured();
+}
+
 function getTransport() {
   const cfg = smtpConfig();
   if (!cfg.auth.user || !cfg.auth.pass) return null;
   return nodemailer.createTransport(cfg);
 }
 
+/** Best-effort SMTP auth check for startup diagnostics (does not send mail). */
+export async function verifySmtpConnection() {
+  if (!isSmtpConfigured()) {
+    return { ok: false, configured: false, reason: 'SMTP_USER / SMTP_PASS missing' };
+  }
+  const transport = getTransport();
+  try {
+    await transport.verify();
+    return { ok: true, configured: true, user: smtpConfig().auth.user };
+  } catch (e) {
+    return {
+      ok: false,
+      configured: true,
+      user: smtpConfig().auth.user,
+      reason: e.message,
+      hint:
+        'Gmail rejected SMTP login (often 534-5.7.9). Prefer Gmail OAuth: open /api/gmail/system-connect with GMAIL_USER, or set a valid App Password in SMTP_PASS.'
+    };
+  }
+}
+
+export async function getEmailDeliveryStatus() {
+  const smtp = await verifySmtpConnection();
+  const gmail = await getSystemMailStatus();
+  return {
+    smtp,
+    gmail,
+    ready: Boolean(smtp.ok || gmail.connected),
+    hint: smtp.ok
+      ? null
+      : gmail.connected
+        ? null
+        : 'Connect system mail: GET http://localhost:5000/api/gmail/system-connect (sign in as GMAIL_USER)'
+  };
+}
+
 const fromAddress = () =>
-  process.env.SMTP_FROM || process.env.SMTP_USER || process.env.EMAIL_USER || 'noreply@mecal.local';
+  process.env.SMTP_FROM ||
+  process.env.GMAIL_USER ||
+  process.env.SMTP_USER ||
+  process.env.EMAIL_USER ||
+  'noreply@mecal.local';
 
 function escapeHtml(s) {
   return String(s || '')
@@ -69,10 +133,62 @@ function wrapHtml(title, inner) {
 </body></html>`;
 }
 
+/**
+ * Deliver auth e-mails: try SMTP App Password first, then Gmail API OAuth.
+ */
+async function deliverMail({ to, subject, html, text }) {
+  const errors = [];
+
+  if (isSmtpConfigured()) {
+    try {
+      const transport = getTransport();
+      await transport.sendMail({
+        from: fromAddress(),
+        to,
+        subject,
+        html,
+        ...(text ? { text } : {})
+      });
+      logger.info(`E-mail sent via SMTP → ${to}`);
+      return { sent: true, via: 'smtp' };
+    } catch (e) {
+      errors.push(`smtp: ${e.message}`);
+      logger.warn(`SMTP send failed, trying Gmail API: ${e.message}`);
+    }
+  }
+
+  if (isGmailConfigured() && (await isSystemMailReady())) {
+    try {
+      await sendSystemHtmlEmail({ to, subject, html });
+      logger.info(`E-mail sent via Gmail API → ${to}`);
+      return { sent: true, via: 'gmail_api' };
+    } catch (e) {
+      errors.push(`gmail_api: ${e.message}`);
+      logger.warn(`Gmail API send failed: ${e.message}`);
+    }
+  } else if (isGmailConfigured()) {
+    errors.push(
+      'gmail_api: not connected — open http://localhost:5000/api/gmail/system-connect'
+    );
+  }
+
+  if (!errors.length) {
+    logger.warn('No e-mail transport configured — mail skipped');
+    return { sent: false };
+  }
+
+  const err = new Error(`Échec d'envoi e-mail (${errors.join(' | ')})`);
+  err.status = 502;
+  throw err;
+}
+
+export async function sendHtmlEmail({ to, subject, html, text }) {
+  return deliverMail({ to, subject, html, text });
+}
+
 export async function sendOtpEmail(to, code) {
-  const transport = getTransport();
-  if (!transport) {
-    logger.warn('SMTP not configured — OTP email skipped');
+  if (!isEmailDeliveryConfigured()) {
+    logger.warn('E-mail not configured — OTP email skipped');
     return { sent: false };
   }
   const html = wrapHtml(
@@ -84,19 +200,16 @@ export async function sendOtpEmail(to, code) {
     <p style="margin:0;font-size:13px;color:#94a3b8;">Ce code expire dans <strong style="color:#e2e8f0;">10 minutes</strong>.</p>
     <p style="margin:16px 0 0;font-size:13px;color:#94a3b8;">Si vous n'avez pas demandé ce code, ignorez cet e-mail.</p>`
   );
-  await transport.sendMail({
-    from: fromAddress(),
+  return deliverMail({
     to,
-    subject: '🔐 Votre code de vérification M-ECAL',
+    subject: 'Votre code de vérification M-ECAL',
     html
   });
-  return { sent: true };
 }
 
 export async function sendWelcomeEmail(to, name, { pendingApproval = false } = {}) {
-  const transport = getTransport();
-  if (!transport) {
-    logger.warn('SMTP not configured — welcome email skipped');
+  if (!isEmailDeliveryConfigured()) {
+    logger.warn('E-mail not configured — welcome email skipped');
     return { sent: false };
   }
   const base = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -118,19 +231,16 @@ export async function sendWelcomeEmail(to, name, { pendingApproval = false } = {
     </div>
     <p style="margin:0;font-size:12px;color:#64748b;">L'équipe M-ECAL vous souhaite une excellente prospection.</p>`
   );
-  await transport.sendMail({
-    from: fromAddress(),
+  return deliverMail({
     to,
-    subject: '👋 Bienvenue sur M-ECAL !',
+    subject: 'Bienvenue sur M-ECAL !',
     html
   });
-  return { sent: true };
 }
 
 export async function sendPasswordResetEmail(to, resetUrl) {
-  const transport = getTransport();
-  if (!transport) {
-    logger.warn('SMTP not configured — reset email skipped');
+  if (!isEmailDeliveryConfigured()) {
+    logger.warn('E-mail not configured — reset email skipped');
     return { sent: false };
   }
   const html = wrapHtml(
@@ -152,14 +262,12 @@ export async function sendPasswordResetEmail(to, resetUrl) {
     'Si vous n\'êtes pas à l\'origine de cette demande, ignorez cet e-mail.'
   ].join('\n');
 
-  await transport.sendMail({
-    from: fromAddress(),
+  return deliverMail({
     to,
-    subject: '🔑 Réinitialisation de votre mot de passe M-ECAL',
+    subject: 'Réinitialisation de votre mot de passe M-ECAL',
     html,
     text
   });
-  return { sent: true };
 }
 
 export async function resolveAdminNotifyEmails() {
@@ -185,9 +293,8 @@ export async function resolveAdminNotifyEmails() {
 }
 
 export async function sendAdminNewSignupEmail({ name, email, role, createdAt }) {
-  const transport = getTransport();
-  if (!transport) {
-    logger.warn('SMTP not configured — admin signup notification skipped');
+  if (!isEmailDeliveryConfigured()) {
+    logger.warn('E-mail not configured — admin signup notification skipped');
     return { sent: false };
   }
 
@@ -222,20 +329,18 @@ export async function sendAdminNewSignupEmail({ name, email, role, createdAt }) 
     <p style="margin:0;font-size:12px;color:#64748b;">Ouvrez la page <strong style="color:#94a3b8;">Validation comptes</strong> pour approuver ou rejeter cette demande.</p>`
   );
 
-  await transport.sendMail({
-    from: fromAddress(),
+  const result = await deliverMail({
     to: recipients.join(', '),
-    subject: `🆕 Nouvelle inscription M-ECAL — ${name}`,
+    subject: `Nouvelle inscription M-ECAL — ${name}`,
     html
   });
   logger.info(`Admin notified of new signup: ${email} → ${recipients.join(', ')}`);
-  return { sent: true, recipients };
+  return { ...result, recipients };
 }
 
 export async function sendAccountApprovedEmail(to, name) {
-  const transport = getTransport();
-  if (!transport) {
-    logger.warn('SMTP not configured — account approved email skipped');
+  if (!isEmailDeliveryConfigured()) {
+    logger.warn('E-mail not configured — account approved email skipped');
     return { sent: false };
   }
 
@@ -255,12 +360,11 @@ export async function sendAccountApprovedEmail(to, name) {
     <p style="margin:0;font-size:12px;color:#64748b;">Si vous n'avez pas demandé ce compte, contactez l'équipe M-ECAL.</p>`
   );
 
-  await transport.sendMail({
-    from: fromAddress(),
+  const result = await deliverMail({
     to,
-    subject: '✅ Votre compte M-ECAL a été validé',
+    subject: 'Votre compte M-ECAL a été validé',
     html
   });
   logger.info(`Account approved email sent to ${to}`);
-  return { sent: true };
+  return result;
 }

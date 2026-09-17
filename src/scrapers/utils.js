@@ -3,6 +3,9 @@ import https from 'https';
 import puppeteer from 'puppeteer';
 import * as cheerio from 'cheerio';
 import logger from '../utils/logger.js';
+import { enrichItemDates, extractDatesFromHtml, extractDatesFromText, parseLooseDate } from './dateExtract.js';
+import { extractDeadlineFromArmpAttachments } from './pdfDeadline.js';
+import { mapLimit } from './concurrency.js';
 
 const UA = process.env.USER_AGENT || 'M-ECAL-Bot/1.0';
 
@@ -22,20 +25,80 @@ function axiosConfig(extra = {}) {
   return config;
 }
 
+export async function fetchBuffer(url, { timeout = 45000, headers = {} } = {}) {
+  const extra = {
+    timeout,
+    responseType: 'arraybuffer',
+    headers: { Accept: 'application/pdf,image/*,*/*', ...headers }
+  };
+  try {
+    const { data, headers: resHeaders } = await axios.get(url, axiosConfig(extra));
+    return { buffer: Buffer.from(data), contentType: resHeaders['content-type'] || '' };
+  } catch (err) {
+    const certError =
+      err.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+      err.code === 'CERT_HAS_EXPIRED' ||
+      /certificate/i.test(err.message || '');
+    if (!certError) throw err;
+    const { data, headers: resHeaders } = await axios.get(
+      url,
+      axiosConfig({
+        ...extra,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false })
+      })
+    );
+    return { buffer: Buffer.from(data), contentType: resHeaders['content-type'] || '' };
+  }
+}
+
 export async function fetchHtml(url, { timeout = 25000, headers = {} } = {}) {
-  const { data } = await axios.get(url, axiosConfig({ timeout, headers }));
-  return data;
+  try {
+    const { data } = await axios.get(url, axiosConfig({ timeout, headers }));
+    return data;
+  } catch (err) {
+    const certError =
+      err.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+      err.code === 'CERT_HAS_EXPIRED' ||
+      /certificate/i.test(err.message || '');
+    if (!certError) throw err;
+    const { data } = await axios.get(
+      url,
+      axiosConfig({
+        timeout,
+        headers,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false })
+      })
+    );
+    return data;
+  }
 }
 
 export async function fetchJson(url, { timeout = 30000, headers = {} } = {}) {
-  const { data } = await axios.get(
-    url,
-    axiosConfig({
-      timeout,
-      headers: { Accept: 'application/json', ...headers }
-    })
-  );
-  return data;
+  try {
+    const { data } = await axios.get(
+      url,
+      axiosConfig({
+        timeout,
+        headers: { Accept: 'application/json', ...headers }
+      })
+    );
+    return data;
+  } catch (err) {
+    const certError =
+      err.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+      err.code === 'CERT_HAS_EXPIRED' ||
+      /certificate/i.test(err.message || '');
+    if (!certError) throw err;
+    const { data } = await axios.get(
+      url,
+      axiosConfig({
+        timeout,
+        headers: { Accept: 'application/json', ...headers },
+        httpsAgent: new https.Agent({ rejectUnauthorized: false })
+      })
+    );
+    return data;
+  }
 }
 
 export async function postJson(url, body, { timeout = 30000, headers = {} } = {}) {
@@ -74,7 +137,7 @@ export function logScraperError(name, err) {
 export async function launchBrowser() {
   const args = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
   const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
-  const base = { headless: 'new', args };
+  const base = { headless: 'new', args, ignoreHTTPSErrors: true };
   if (executablePath) return puppeteer.launch({ ...base, executablePath });
   try {
     return await puppeteer.launch({ ...base, channel: 'chrome' });
@@ -91,20 +154,64 @@ function parseArmpPage(html, platform) {
   $('a[href*="/poste/"]').each((_, el) => {
     const href = $(el).attr('href');
     if (!href) return;
-    const title = safeText($, el);
+    const $a = $(el);
+    const title =
+      $a.find('.job-listing-loop-job__title, h3, h2').first().text().replace(/\s+/g, ' ').trim() ||
+      safeText($, el);
     if (title.length < 15) return;
+    const org = $a.find('.job-listing-company strong, .company strong').first().text().replace(/\s+/g, ' ').trim();
+    const timeEl = $a.find('time').first();
+    const postedDate =
+      parseLooseFromAttr(timeEl.attr('datetime')) || parseLooseDate(timeEl.text()) || null;
+    const cardText = $a.text().replace(/\s+/g, ' ').trim();
+    const dates = extractDatesFromText(`${title}\n${cardText}`);
+    const listingHasDeadline = /date\s*(de\s*)?(cl[oô]ture|limite)|deadline|cl[oô]ture/i.test(cardText);
     items.push({
       title,
-      description: title,
-      organization: 'ARMP RDC',
-      deadline: null,
-      postedDate: null,
+      description: cardText.slice(0, 2000) || title,
+      organization: org || 'ARMP RDC',
+      deadline: listingHasDeadline ? dates.deadline : null,
+      postedDate: postedDate || dates.postedDate,
       sourceUrl: absoluteUrl(ARMP_BASE, href),
       platform,
       location: 'RDC — République Démocratique du Congo'
     });
   });
   return items;
+}
+
+function parseLooseFromAttr(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+async function enrichArmpDetailDates(items, { maxDetail = 50 } = {}) {
+  const slice = items.slice(0, maxDetail);
+  const rest = items.slice(maxDetail);
+  const pageConcurrency = Math.max(1, Math.min(4, Number(process.env.ARMP_DETAIL_CONCURRENCY || 3)));
+
+  await mapLimit(slice, pageConcurrency, async (item) => {
+    try {
+      const html = await fetchHtml(item.sourceUrl);
+      const dates = extractDatesFromHtml(html);
+      if (!item.deadline && dates.deadline) item.deadline = dates.deadline;
+      if (!item.postedDate && dates.postedDate) item.postedDate = dates.postedDate;
+      if (!item.deadline) {
+        const fromFile = await extractDeadlineFromArmpAttachments(html, item.sourceUrl, {
+          postedDate: item.postedDate
+        });
+        if (fromFile.deadline) {
+          item.deadline = fromFile.deadline;
+          item.deadlineSource = fromFile.source;
+        }
+      }
+    } catch {
+      /* listing dates already applied when available */
+    }
+  });
+
+  return [...slice, ...rest].map((item) => enrichItemDates(item));
 }
 
 /**
@@ -131,5 +238,5 @@ export async function scrapeArmpCategory(categorySlug, { platform, limit = 50, m
     }
   }
 
-  return unique;
+  return enrichArmpDetailDates(unique, { maxDetail: unique.length });
 }
