@@ -21,16 +21,19 @@ import analyticsRoutes from './routes/analytics.js';
 import settingsRoutes from './routes/settings.js';
 import agentRoutes from './routes/agent.js';
 import adminUsersRoutes from './routes/adminUsers.js';
+import nrcRoutes from './routes/nrc.js';
 import aiRoutes, { handleAiDebug, handleAiStatus, handleAiTest } from './routes/ai.js';
 import jobAssistantRoutes from './routes/jobAssistant.js';
 import gmailRoutes from './routes/gmail.js';
 import ttsRoutes from './routes/tts.js';
 import voiceRoutes from './routes/voice.js';
 import notificationsRoutes from './routes/notifications.js';
+import searchRoutes from './routes/search.js';
 import User from './models/User.js';
 import bcrypt from 'bcryptjs';
 import logger from './utils/logger.js';
 import { startScraperJobs } from './jobs/scraperJob.js';
+import { startNrcJobs } from './jobs/nrcJob.js';
 import { ensureDefaultSources } from './services/sourceService.js';
 import { getGmailConfigDiagnostics, isGmailConfigured } from './config/gmail.js';
 import { getEmailDeliveryStatus } from './services/email.service.js';
@@ -113,11 +116,13 @@ protectedApi.use('/analytics', analyticsRoutes);
 protectedApi.use('/settings', settingsRoutes);
 protectedApi.use('/agent', agentRoutes);
 protectedApi.use('/admin', adminUsersRoutes);
+protectedApi.use('/nrc', nrcRoutes);
 protectedApi.use('/ai', aiRoutes);
 protectedApi.use('/job-assistant', jobAssistantRoutes);
 protectedApi.use('/tts', ttsRoutes);
 protectedApi.use('/voice', voiceRoutes);
 protectedApi.use('/notifications', notificationsRoutes);
+protectedApi.use('/search', searchRoutes);
 
 app.use('/api', protectedApi);
 
@@ -199,6 +204,7 @@ async function main() {
     });
   }
   startScraperJobs();
+  startNrcJobs();
   app.listen(PORT, () => logger.info(`API listening on ${PORT}`));
 }
 

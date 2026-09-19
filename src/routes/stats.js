@@ -83,7 +83,7 @@ router.get('/', async (req, res, next) => {
       listScanAlerts({ unreadOnly: true, limit: 8 }),
       getAiDegradedMode(),
       ScrapeLog.find({ status: 'success', totalRaw: { $gt: 0 } })
-        .sort({ finishedAt: -1, startedAt: -1 })
+        .sort({ startedAt: -1 })
         .limit(10)
         .select(
           'startedAt finishedAt totalRaw skipped recommendedCount scoredCount skipReasons filterRetentionPct relevancePct globalRelevancePct'
@@ -126,6 +126,50 @@ router.get('/', async (req, res, next) => {
         organization: a.opportunity?.organization || ''
       }))
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+const SCRAPE_LIST_FIELDS =
+  'startedAt finishedAt status totalRaw saved skipped archivedExpired archivedStale archivedTotal message errors triggeredBy aiProvider aiProviders recommendedCount scoredCount failureKind';
+
+function parseDate(value) {
+  if (!value) return null;
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Collection history, newest first, one page at a time. `from` and `to` (ISO dates) keep only the runs that
+ * finished (or, when still running, started) inside that window, so the list changes with the date and time asked.
+ */
+router.get('/scrapes', async (req, res, next) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit, 10) || 5));
+    const from = parseDate(req.query.from);
+    const to = parseDate(req.query.to);
+
+    const filter = {};
+    if (from || to) {
+      const range = {};
+      if (from) range.$gte = from;
+      if (to) range.$lte = to;
+      filter.$or = [{ finishedAt: range }, { finishedAt: { $in: [null] }, startedAt: range }];
+    }
+
+    const [items, total] = await Promise.all([
+      ScrapeLog.find(filter)
+        .sort({ startedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .select(SCRAPE_LIST_FIELDS)
+        .lean(),
+      ScrapeLog.countDocuments(filter)
+    ]);
+
+    res.json({ items, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) });
   } catch (e) {
     next(e);
   }

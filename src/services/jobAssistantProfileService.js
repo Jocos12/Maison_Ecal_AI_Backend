@@ -24,7 +24,7 @@ export function serializeJobProfile(user) {
   return normalizeProfile({
     fullName: p.fullName || user?.name || '',
     email: p.email || user?.email || '',
-    phone: p.phone || user?.whatsappNumber || '',
+    phone: p.phone || user?.phone || user?.whatsappNumber || '',
     education: p.education || '',
     experience: p.experience || '',
     skills: p.skills || '',
@@ -33,7 +33,7 @@ export function serializeJobProfile(user) {
 }
 
 export async function getJobAssistantProfile(userId) {
-  const user = await User.findById(userId).select('name email whatsappNumber jobAssistantProfile').lean();
+  const user = await User.findById(userId).select('name email phone whatsappNumber jobAssistantProfile').lean();
   if (!user) throw Object.assign(new Error('Utilisateur introuvable'), { status: 404 });
   const meta = user.jobAssistantProfile || {};
   return {

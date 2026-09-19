@@ -21,10 +21,10 @@ export async function recordScanFailureAlert({ scrapeLogId, message, kind = 'pip
     logger.error(`Alerte dashboard collecte: ${title} — ${text.slice(0, 300)}`);
     const emails = await resolveAdminNotifyEmails();
     const recipients = [...new Set([ADMIN_FALLBACK, ...emails].filter(Boolean))];
-    const html = `<p><strong>${title}</strong></p><pre style="white-space:pre-wrap">${text}</pre><p>Déclencheur : ${triggeredBy || '—'}</p>`;
+    const html = `<p><strong>${title}</strong></p><pre style="white-space:pre-wrap">${text}</pre><p>Déclencheur : ${triggeredBy || 'n/d'}</p>`;
     for (const to of recipients) {
       try {
-        await sendHtmlEmail({ to, subject: `M-ECAL — ${title}`, html });
+        await sendHtmlEmail({ to, subject: `M-ECAL, ${title}`, html });
       } catch (e) {
         logger.warn(`Alerte e-mail scan error vers ${to}: ${e.message}`);
       }

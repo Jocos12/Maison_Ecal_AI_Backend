@@ -16,7 +16,7 @@ const DEFAULT_SETTINGS = {
   }
 };
 
-const DEFAULT_PROFILE = {
+export const DEFAULT_PROFILE = {
   companyName: "Maison d'Études, de Conseil et d'Assistance Logistique",
   director: 'Ghislain',
   email: 'maisonecal@gmail.com',
