@@ -75,7 +75,7 @@ export async function previewApplicationEmail({ userId, opportunityId, applicati
     String(letterOverride || app?.letterText || '').trim() || (await generateMotivationLetter(opp, profile))
   );
   const to = extractOpportunityContactEmail(opp) || app?.contactPerson?.email || '';
-  const subject = `Candidature — ${opp.title}`;
+  const subject = `Candidature, ${opp.title}`;
   const cv = await loadCvAttachment(userId);
   const gmail = await getGmailStatus(userId).catch(() => ({ connected: false, userEmail: null }));
 
@@ -131,7 +131,7 @@ export async function sendApplicationEmail({
     err.status = 400;
     throw err;
   }
-  const emailSubject = String(subject || `Candidature — ${opp.title}`).trim();
+  const emailSubject = String(subject || `Candidature, ${opp.title}`).trim();
   const cv = await loadCvAttachment(userId);
   if (!cv?.exists) {
     const err = new Error('CV introuvable. Importez le CV (ex. True CV COURBON.docx) avant l’envoi.');

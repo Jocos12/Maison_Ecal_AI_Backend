@@ -321,7 +321,11 @@ export function isScrapeInFlight() {
   return Boolean(scrapeInFlight);
 }
 
-export async function runAllScrapers({ triggeredBy = 'manual', onlyKeys = null } = {}) {
+/** Scrapers that answer in seconds. SIGMAP takes 30 s and ProfilRDC and AchatPublicRDC (OCR of PDFs) take minutes and are left to the scheduled full scan. */
+export const QUICK_SCRAPER_KEYS = ['ReliefWeb', 'UNGM', 'ARSP', 'AfDB', 'UNGMVeille', 'AfDBVeille'];
+const QUICK_PARALLEL_KEYS = ['ReliefWeb', 'UNGM', 'ARSP', 'AfDB'];
+
+export async function runAllScrapers({ triggeredBy = 'manual', onlyKeys = null, parallel = false } = {}) {
   if (scrapeInFlight) {
     logger.info(`Scrape ignoré (déjà en cours) — trigger=${triggeredBy}`);
     return scrapeInFlight;
@@ -348,7 +352,47 @@ export async function runAllScrapers({ triggeredBy = 'manual', onlyKeys = null }
 
         const activeScraperKeys = await getActiveScraperKeys();
         const results = Object.fromEntries(Object.keys(SCRAPERS).map((key) => [key, []]));
-        const only = Array.isArray(onlyKeys) && onlyKeys.length ? new Set(onlyKeys) : null;
+        // Quick mode still respects the sources the admin switched off.
+        const only =
+          Array.isArray(onlyKeys) && onlyKeys.length
+            ? new Set(onlyKeys.filter((key) => !parallel || activeScraperKeys.has(key)))
+            : null;
+
+        const runOne = async (key, scraper) => {
+          try {
+            results[key] = await timeSpan(`scraper:${key}`, () => scraper());
+            logger.info(`Scraper ${key}: ${results[key].length} raw`);
+            const rawN = Array.isArray(results[key]) ? results[key].length : 0;
+            await Source.updateOne(
+              { scraperKey: key },
+              {
+                $set: {
+                  lastScrapedAt: new Date(),
+                  lastStatus: rawN > 0 ? 'success' : 'idle',
+                  lastRawCount: rawN,
+                  lastErrorMessage: ''
+                }
+              }
+            );
+          } catch (e) {
+            errors.push({ source: key, message: e.message });
+            await Source.updateOne(
+              { scraperKey: key },
+              { $set: { lastStatus: 'error', lastErrorMessage: String(e.message || '').slice(0, 400) } }
+            );
+            logger.warn(`Scraper ${key}: ${e.message}`);
+          }
+        };
+
+        // Quick mode: the independent scrapers run side by side, so the scan lasts as long as the slowest one.
+        const preDone = new Set();
+        if (parallel && only) {
+          const batch = Object.entries(SCRAPERS).filter(
+            ([key]) => QUICK_PARALLEL_KEYS.includes(key) && only.has(key)
+          );
+          await Promise.all(batch.map(([key, scraper]) => runOne(key, scraper)));
+          batch.forEach(([key]) => preDone.add(key));
+        }
 
         for (const [key, scraper] of Object.entries(SCRAPERS)) {
           if (abortState.timedOut) break;
@@ -376,29 +420,8 @@ export async function runAllScrapers({ triggeredBy = 'manual', onlyKeys = null }
             logger.info(`Scraper UNGMVeille: ${results[key].length} depuis UNGM déjà lu`);
             continue;
           }
-          try {
-            results[key] = await timeSpan(`scraper:${key}`, () => scraper());
-            logger.info(`Scraper ${key}: ${results[key].length} raw`);
-            const rawN = Array.isArray(results[key]) ? results[key].length : 0;
-            await Source.updateOne(
-              { scraperKey: key },
-              {
-                $set: {
-                  lastScrapedAt: new Date(),
-                  lastStatus: rawN > 0 ? 'success' : 'idle',
-                  lastRawCount: rawN,
-                  lastErrorMessage: ''
-                }
-              }
-            );
-          } catch (e) {
-            errors.push({ source: key, message: e.message });
-            await Source.updateOne(
-              { scraperKey: key },
-              { $set: { lastStatus: 'error', lastErrorMessage: String(e.message || '').slice(0, 400) } }
-            );
-            logger.warn(`Scraper ${key}: ${e.message}`);
-          }
+          if (preDone.has(key)) continue;
+          await runOne(key, scraper);
         }
 
         if (abortState.timedOut) {

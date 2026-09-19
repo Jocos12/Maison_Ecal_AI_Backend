@@ -102,7 +102,7 @@ export async function alertIfScrapeOverdueOrFailed(options = {}) {
 
   const minutes = Math.round((watch.ageMs || 0) / 60000);
   const reason = watch.lastFailed
-    ? `Dernier scan en erreur (${watch.lastStatus})${watch.lastErrorMessage ? ` — ${watch.lastErrorMessage}` : ''}`
+    ? `Dernier scan en erreur (${watch.lastStatus})${watch.lastErrorMessage ? `, ${watch.lastErrorMessage}` : ''}`
     : `Aucun scan réussi depuis ${minutes} min (seuil ${Math.round(SCRAPE_STALE_AFTER_MS / 60000)} min)`;
   logger.error(`VEILLE 24/7 — alerte scan: ${reason}`);
 
@@ -113,7 +113,7 @@ export async function alertIfScrapeOverdueOrFailed(options = {}) {
       lastCriticalAlertAt = now;
       lastOverdueAlertAt = now;
       const result = await notifyAdmins({
-        subject: 'M-ECAL — scan automatique en retard de plus de 2 h',
+        subject: 'M-ECAL, scan automatique en retard de plus de 2 h',
         html: `<p>Le scan automatique M-ECAL est en retard de plus de 2h, vérifiez le planificateur externe.</p><p>Dernier scan : ${minutes} minutes.</p>`
       });
       logger.error('Alerte critique 2h envoyée', { sent: result.sent, recipientCount: result.recipients.length });
@@ -126,7 +126,7 @@ export async function alertIfScrapeOverdueOrFailed(options = {}) {
     if (now - lastOverdueAlertAt >= 50 * 60 * 1000) {
       lastOverdueAlertAt = now;
       await notifyAdmins({
-        subject: 'M-ECAL — scan de veille en retard',
+        subject: 'M-ECAL, scan de veille en retard',
         html: `<p>${reason}</p><p>Vérifiez le planificateur externe (POST /api/internal/scrape, Authorization Bearer) ou le process Node.</p>`
       });
     }

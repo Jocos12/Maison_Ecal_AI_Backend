@@ -121,7 +121,7 @@ function wrapHtml(title, inner) {
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;margin:0 auto;">
     <tr><td style="background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:32px 28px;">
       <div style="font-size:22px;font-weight:800;color:#3b82f6;letter-spacing:-0.02em;">M-ECAL</div>
-      <div style="font-size:12px;color:#94a3b8;margin-top:4px;">Moniteur d'opportunités logistiques — RDC</div>
+      <div style="font-size:12px;color:#94a3b8;margin-top:4px;">Moniteur d'opportunités logistiques, RDC</div>
       <div style="height:24px"></div>
       ${inner}
       <div style="height:24px"></div>
@@ -238,33 +238,33 @@ export async function sendWelcomeEmail(to, name, { pendingApproval = false } = {
   });
 }
 
-export async function sendPasswordResetEmail(to, resetUrl) {
+/** "Forgot password" e-mail: 6-digit code the user types in the app before choosing a new password. */
+export async function sendPasswordResetOtpEmail(to, code) {
   if (!isEmailDeliveryConfigured()) {
-    logger.warn('E-mail not configured — reset email skipped');
+    logger.warn('E-mail not configured, reset code email skipped');
     return { sent: false };
   }
   const html = wrapHtml(
     'Réinitialisation M-ECAL',
-    `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Vous avez demandé la réinitialisation de votre mot de passe.</p>
-    <div style="text-align:center;margin:28px 0;">
-      <a href="${escapeHtml(resetUrl)}" style="display:inline-block;padding:14px 28px;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-weight:700;text-decoration:none;font-size:14px;box-shadow:0 10px 25px rgba(37,99,235,0.35);">Réinitialiser mon mot de passe</a>
+    `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Vous avez demandé la réinitialisation de votre mot de passe. Saisissez ce code dans l'application :</p>
+    <div style="text-align:center;margin:24px 0;padding:20px 16px;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.35);border-radius:12px;">
+      <span style="font-size:2rem;font-weight:700;letter-spacing:0.35em;color:#60a5fa;font-family:ui-monospace,monospace;">${code}</span>
     </div>
-    <p style="margin:0;font-size:13px;color:#94a3b8;">Ce lien expire dans <strong style="color:#e2e8f0;">15 minutes</strong>.</p>
-    <p style="margin:16px 0 0;font-size:12px;color:#64748b;">Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail — votre mot de passe ne sera pas modifié.</p>`
+    <p style="margin:0;font-size:13px;color:#94a3b8;">Ce code expire dans <strong style="color:#e2e8f0;">10 minutes</strong>.</p>
+    <p style="margin:16px 0 0;font-size:12px;color:#64748b;">Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail : votre mot de passe ne sera pas modifié.</p>`
   );
   const text = [
     'Réinitialisation de votre mot de passe M-ECAL',
     '',
-    'Cliquez sur ce lien pour choisir un nouveau mot de passe :',
-    resetUrl,
+    `Votre code de vérification : ${code}`,
     '',
-    'Ce lien expire dans 15 minutes.',
-    'Si vous n\'êtes pas à l\'origine de cette demande, ignorez cet e-mail.'
+    'Ce code expire dans 10 minutes.',
+    "Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail."
   ].join('\n');
 
   return deliverMail({
     to,
-    subject: 'Réinitialisation de votre mot de passe M-ECAL',
+    subject: 'Code de réinitialisation de votre mot de passe M-ECAL',
     html,
     text
   });
@@ -331,7 +331,7 @@ export async function sendAdminNewSignupEmail({ name, email, role, createdAt }) 
 
   const result = await deliverMail({
     to: recipients.join(', '),
-    subject: `Nouvelle inscription M-ECAL — ${name}`,
+    subject: `Nouvelle inscription M-ECAL, ${name}`,
     html
   });
   logger.info(`Admin notified of new signup: ${email} → ${recipients.join(', ')}`);

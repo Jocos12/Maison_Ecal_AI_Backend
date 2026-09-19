@@ -2,7 +2,8 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import rateLimit from 'express-rate-limit';
 import Opportunity from '../models/Opportunity.js';
-import { runAllScrapers } from '../scrapers/index.js';
+import { runAllScrapers, isScrapeInFlight, QUICK_SCRAPER_KEYS } from '../scrapers/index.js';
+import logger from '../utils/logger.js';
 import { sanitizeSearchParam } from '../services/filterService.js';
 import { archiveInactiveOpportunities, activeOpportunityFilter, freezeAndSyncNewFlags } from '../services/opportunityLifecycle.js';
 import { getApplyGuide } from '../services/applyGuideService.js';
@@ -168,11 +169,30 @@ router.post('/scrape', scrapeLimiter, async (req, res, next) => {
     if (!['Admin', 'admin'].includes(req.user?.role)) {
       return res.status(403).json({ message: 'Admin only' });
     }
-    const summary = await runAllScrapers({ triggeredBy: req.user?.email || 'manual' });
+    const triggeredBy = req.user?.email || 'manual';
+    // A full scan takes several minutes: with { background: true } answer at once (202) and let the
+    // client follow the progress with GET /scrape/status instead of holding the request open.
+    // { quick: true } scans only the fast sources, side by side (about ten seconds instead of ten minutes).
+    if (req.body?.background === true) {
+      const alreadyRunning = isScrapeInFlight();
+      if (!alreadyRunning) {
+        const scanOptions =
+          req.body?.quick === true ? { onlyKeys: QUICK_SCRAPER_KEYS, parallel: true } : {};
+        runAllScrapers({ triggeredBy, ...scanOptions }).catch((err) => {
+          logger.warn(`Collecte manuelle en échec: ${err?.message || err}`);
+        });
+      }
+      return res.status(202).json({ started: !alreadyRunning, running: true });
+    }
+    const summary = await runAllScrapers({ triggeredBy });
     res.json(summary);
   } catch (e) {
     next(e);
   }
+});
+
+router.get('/scrape/status', (_req, res) => {
+  res.json({ running: isScrapeInFlight() });
 });
 
 router.get('/:id/apply-guide', async (req, res, next) => {
