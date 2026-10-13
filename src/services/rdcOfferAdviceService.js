@@ -1,8 +1,16 @@
 import Opportunity from '../models/Opportunity.js';
-import { callAIForJSON, callAIText } from './aiService.js';
+import { callAIForJSON, callAIWithFallback, isComplexAiTask } from './aiService.js';
 import { searchJobsWithAI } from './jobSearchService.js';
+import logger from '../utils/logger.js';
 import { detectMessageLanguage } from '../utils/detectMessageLanguage.js';
+import { answerInLocalMode } from './localModeAssistant.js';
 import { getLanguageInstruction } from '../prompts/jobAssistantPrompt.js';
+import { activeOpportunityFilter } from './opportunityLifecycle.js';
+import { getAgentSystemSnapshot } from './agentContextService.js';
+import {
+  formatVeilleSnapshotForPrompt,
+  MECAL_VEILLE_SYSTEM_PROMPT
+} from '../prompts/veilleAgentPrompt.js';
 
 const MECAL_CONTEXT = `M-ECAL (Maison d'Études, Conseil & Assistance Logistique) opère en RDC.
 Services cœur : formation logistique, consultance, inventaire (actifs/général), études de marché, assistance logistique.
@@ -72,8 +80,8 @@ function wantsCountOrList(message = '') {
 async function getDbStats() {
   try {
     const [totalActive, verifiedRdc, employment] = await Promise.all([
-      Opportunity.countDocuments({ isArchived: false }),
-      Opportunity.countDocuments({ isArchived: false, locationStatus: 'rdc_confirme' }),
+      Opportunity.countDocuments(activeOpportunityFilter()),
+      Opportunity.countDocuments(activeOpportunityFilter({ locationStatus: 'rdc_confirme' })),
       Opportunity.countDocuments({
         isArchived: false,
         $or: [
@@ -185,12 +193,12 @@ async function answerFromLocalData(message, { offers = [], offer = null, dbStats
   return null;
 }
 
-async function safeCallAIText(prompt, systemPrompt, maxTokens = 1200) {
+async function safeCallAIText(prompt, systemPrompt, maxTokens = 1800) {
   try {
-    const text = await callAIText(prompt, systemPrompt, maxTokens);
-    return text?.trim() || null;
+    const result = await callAIWithFallback(prompt, systemPrompt, maxTokens, { mode: 'full' });
+    return { text: result?.text?.trim() || null, provider: result?.provider || 'ai' };
   } catch {
-    return null;
+    return { text: null, provider: null };
   }
 }
 
@@ -282,7 +290,7 @@ JSON: {"summary":"...","picks":[{"id":"...","score":85,"reason":"...","action":"
       provider
     };
   } catch {
-    return rankOffersLocally(offers);
+    return { ...rankOffersLocally(offers), aiUnavailable: true };
   }
 }
 
@@ -290,20 +298,26 @@ export async function chatAboutRdcOffer({
   offer,
   offers = [],
   messages = [],
+  history = [],
   message,
-  systemContext = null
+  systemContext = null,
+  userId = null
 }) {
-  const dbStats = await getDbStats();
-
-  const localAnswer = await answerFromLocalData(message, { offers, offer, dbStats });
-  if (localAnswer) {
-    return { reply: localAnswer, jobs: [], isSearch: false, provider: 'local' };
-  }
-
-  const history = messages
-    .slice(-14)
+  const thread = (messages?.length ? messages : history) || [];
+  const historyText = thread
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .slice(-16)
     .map((m) => `${m.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${m.content}`)
     .join('\n');
+
+  let snapshot = null;
+  try {
+    snapshot = await getAgentSystemSnapshot(userId);
+  } catch (e) {
+    logger.warn(`Snapshot agent veille: ${e.message}`);
+    snapshot = null;
+  }
+  const snapshotBlock = snapshot ? formatVeilleSnapshotForPrompt(snapshot) : '';
 
   if (wantsJobSearch(message)) {
     let searchResult = { jobs: [], message: '' };
@@ -337,22 +351,23 @@ export async function chatAboutRdcOffer({
       .map((j, i) => `${i + 1}. ${j.title} — ${j.organization} (${j.city})`)
       .join('\n');
 
-    const advicePrompt = `${history ? `Historique:\n${history}\n\n` : ''}Demande: ${message}\nOffres:\n${jobsBlock}\n${
+    const advicePrompt = `${historyText ? `Historique:\n${historyText}\n\n` : ''}${snapshotBlock ? `${snapshotBlock}\n\n` : ''}Demande: ${message}\nOffres trouvées:\n${jobsBlock}\n${
       offer ? formatOfferBlock(offer, 1) : ''
     }`;
 
-    const reply = await safeCallAIText(
+    const ai = await safeCallAIText(
       advicePrompt,
-      `${MECAL_CONTEXT}\nAssistant M-ECAL. Français.`
+      `${MECAL_VEILLE_SYSTEM_PROMPT}\n${MECAL_CONTEXT}`,
+      isComplexAiTask(message) ? 4096 : 2048
     );
 
     return {
-      reply: reply || offlineSearchAdvice(searchResult, offer),
+      reply: ai.text || offlineSearchAdvice(searchResult, offer),
       jobs: searchResult.jobs || [],
       suggestions: searchResult.suggestions || [],
       manualLinks: searchResult.manualLinks || [],
       isSearch: true,
-      provider: reply ? 'ai' : 'local'
+      provider: ai.text ? ai.provider : 'local'
     };
   }
 
@@ -364,20 +379,41 @@ export async function chatAboutRdcOffer({
       ? `\n\nCONTEXTE PLATEFORME M-ECAL:\nPage: ${systemContext.currentPage || '/'}\nOffres: ${systemContext.opportunityCount}\nCandidatures: ${systemContext.applicationCount}\nGmail non lus: ${systemContext.gmailUnread ?? '?'}\n${systemContext.navList || ''}\n`
       : '';
 
-  const prompt = `${history ? `Historique:\n${history}\n\n` : ''}${systemBlock}Contexte offres:\n${offerBlock}\n\nQuestion: ${message}`;
+  const prompt = `${historyText ? `Historique:\n${historyText}\n\n` : ''}${snapshotBlock ? `${snapshotBlock}\n\n` : ''}${systemBlock}Extraits d'offres du panneau (complément):\n${offerBlock || '(aucun)'}\n\nQuestion de l'utilisateur:\n${message}`;
 
-  const locale = detectMessageLanguage(message, messages);
+  const locale = detectMessageLanguage(message, thread);
   const langRule = getLanguageInstruction(locale);
 
-  const reply = await safeCallAIText(
+  const complex = isComplexAiTask(message) || /tendance|pourquoi|compar|pertinen|semaine|intéress|analys/i.test(message);
+  const ai = await safeCallAIText(
     prompt,
-    `${MECAL_CONTEXT}\nTu es l'agent IA M-ECAL. Tu connais toute la plateforme (sidebar, pages, fonctionnalités, sources emploi : ReliefWeb, MediaCongo, UNjobnet, Coordination Sud, Impact Pool). ${langRule} Ne invente pas de liens. Si la question concerne le menu ou une page, guide l'utilisateur vers le bon chemin.`
+    `${MECAL_VEILLE_SYSTEM_PROMPT}
+
+${langRule}
+${systemContext?.aiContextBlock ? `Notes UI: ${systemContext.aiContextBlock}` : ''}`,
+    complex ? 8192 : 4096
   );
 
+  if (ai.text) {
+    return {
+      reply: ai.text,
+      jobs: [],
+      isSearch: false,
+      provider: ai.provider
+    };
+  }
+
+  const local = await answerInLocalMode({
+    messages: thread,
+    lastUser: message,
+    locale,
+    userId,
+    knownJobs: []
+  });
   return {
-    reply: reply || offlineOfferAdvice(offer, message),
-    jobs: [],
+    reply: local.reply,
+    jobs: local.jobs || [],
     isSearch: false,
-    provider: reply ? 'ai' : 'local'
+    provider: 'local'
   };
 }

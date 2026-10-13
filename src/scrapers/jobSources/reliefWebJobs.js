@@ -9,7 +9,7 @@ const LIMIT = 40;
 const RDC_COUNTRY = 'Democratic Republic of the Congo';
 
 function reliefWebAppName() {
-  return (process.env.RELIEFWEB_APPNAME || '').trim();
+  return (process.env.RELIEFWEB_APPNAME || 'mecal-monitor-maison-ecal-rdc').trim();
 }
 
 export function isReliefWebConfigured() {
@@ -86,7 +86,7 @@ export async function searchReliefWebJobs({ city } = {}) {
     const code = e.code === 'not_configured' ? 'not_configured' : e.response?.status || 'unknown';
     if (code === 403) {
       logger.warn(
-        `[JobAssistant] ReliefWeb jobs 403 — configurez RELIEFWEB_APPNAME dans backend/.env`
+        '[JobAssistant] ReliefWeb jobs 403 — appname non encore approuvé (https://apidoc.reliefweb.int/parameters)'
       );
     } else if (code !== 'not_configured') {
       logger.warn(`[JobAssistant] ReliefWeb jobs: ${e.message}`);

@@ -73,16 +73,19 @@ export async function scrapeDevex() {
       return [];
     }
 
-    return snapshot.cards.map((row) => ({
-      title: row.title,
-      description: row.blob,
-      organization: '',
-      deadline: null,
-      postedDate: null,
-      sourceUrl: row.href,
-      platform: 'DevEx',
-      location: 'DRC — Democratic Republic of the Congo'
-    }));
+    const { enrichItemDates } = await import('./dateExtract.js');
+    return snapshot.cards.map((row) =>
+      enrichItemDates({
+        title: row.title,
+        description: row.blob,
+        organization: '',
+        deadline: null,
+        postedDate: null,
+        sourceUrl: row.href,
+        platform: 'DevEx',
+        location: 'DRC — Democratic Republic of the Congo'
+      })
+    );
   } catch (e) {
     logScraperError('DevEx', e);
     if (browser) await browser.close().catch(() => {});

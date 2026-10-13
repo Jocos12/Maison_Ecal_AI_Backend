@@ -9,7 +9,12 @@
     "dev": "node src/server.js",
     "prestart": "npm run kill-port",
     "start": "node src/server.js",
-    "reclassify-opportunities": "node scripts/reclassify-opportunities.mjs"
+    "reclassify-opportunities": "node scripts/reclassify-opportunities.mjs",
+    "rescore-opportunities": "node scripts/rescore-opportunities.mjs",
+    "pm2:start": "npx pm2 start ecosystem.config.cjs",
+    "pm2:stop": "npx pm2 stop mecal-api",
+    "pm2:restart": "npx pm2 restart mecal-api",
+    "pm2:status": "npx pm2 status"
   },
   "engines": {
     "node": ">=20.0.0"

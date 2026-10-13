@@ -43,16 +43,18 @@ router.post('/rdc-offers/rank', async (req, res, next) => {
 
 router.post('/rdc-offers/chat', async (req, res, next) => {
   try {
-    const { offer, offers = [], messages = [], message, systemContext } = req.body || {};
+    const { offer, offers = [], messages = [], history = [], message, systemContext } = req.body || {};
     if (!message?.trim()) {
       return res.status(400).json({ message: 'Message requis.' });
     }
     const result = await chatAboutRdcOffer({
       offer,
       offers,
-      messages,
+      messages: messages.length ? messages : history,
+      history,
       message: message.trim(),
-      systemContext
+      systemContext,
+      userId: req.userId
     });
     res.json(result);
   } catch (e) {
@@ -235,7 +237,9 @@ router.post('/chat', async (req, res, next) => {
     }
     const { chatWithJobAssistant } = await import('../services/jobAssistantService.js');
     const result = await chatWithJobAssistant({
-      messages: [...messages, { role: 'user', content: legacyMessage }]
+      messages: [...messages, { role: 'user', content: legacyMessage }],
+      userId: req.userId,
+      locale: req.body?.locale || 'fr'
     });
     res.json(result);
   } catch (e) {
@@ -245,14 +249,15 @@ router.post('/chat', async (req, res, next) => {
 
 router.post('/generate-document', async (req, res, next) => {
   try {
-    const { type, job, profile, conversationId, mode, locale } = req.body || {};
+    const { type, job, profile, conversationId, mode, locale, extra } = req.body || {};
     const result = await generateJobDocument({
       userId: req.userId,
       type,
       job,
       profile,
       mode,
-      locale: locale || 'fr'
+      locale: locale || 'fr',
+      extra: extra || {}
     });
     if (conversationId) {
       const conversation = await persistDocumentInConversation(

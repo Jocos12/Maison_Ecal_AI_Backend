@@ -1,4 +1,4 @@
-const RDC_CITIES = [
+export const RDC_CITIES = [
   'kinshasa',
   'lubumbashi',
   'goma',
@@ -29,10 +29,13 @@ const JOB_ROLES = [
 ];
 
 const SEARCH_INTENT =
-  /recherche|trouve|offre|emploi|poste|magasinier|logistique|logistoque|kinshasa|lubumbashi|goma|bukavu|kalemie|recrute|cherche|vacance|hiring|verifie|vérifie|service/i;
+  /recherche|trouve|offre|emploi|poste|magasinier|logistique|logistoque|recrute|cherche|vacance|hiring|job search/i;
 
 const REFINE_INTENT =
   /^(et |aussi |pour un |pour une |dans |à |et pour|plutôt|autre ville|autre poste|verifie|vérifie)/i;
+
+const FOLLOW_UP_INTENT =
+  /\b(sure|sûr|sûre|really|even|même|confirm|certain|exact|vrai|vraiment|are you|tu es|c['’]est bien|tu confirmes|tu penses|still|toujours)\b/i;
 
 const ALL_RDC_INTENT =
   /toutes les villes|toute la rdc|toutes villes|partout en rdc|dans tout le pays|dans toutes les villes|whole country|all cities|pays entier/i;
@@ -76,7 +79,11 @@ export function isAllRdcSearch(userMessage, priorUserMessages = []) {
 
 export function shouldRunSearch(userMessage, messages = []) {
   const text = normalizeTypos(userMessage.trim());
-  if (SEARCH_INTENT.test(text)) return true;
+  const wantsJobs = SEARCH_INTENT.test(text);
+
+  if (FOLLOW_UP_INTENT.test(text) && !wantsJobs) return false;
+
+  if (wantsJobs) return true;
   if (ALL_RDC_INTENT.test(text)) return true;
 
   const hadPriorSearch = messages.some(
@@ -86,7 +93,10 @@ export function shouldRunSearch(userMessage, messages = []) {
   if (hadPriorSearch && REFINE_INTENT.test(text)) return true;
   if (hadPriorSearch && ALL_RDC_INTENT.test(text)) return true;
   if (hadPriorSearch && JOB_ROLES.some((r) => text.toLowerCase().includes(r))) return true;
-  if (hadPriorSearch && RDC_CITIES.some((c) => text.toLowerCase().includes(c))) return true;
+
+  const mentionsCity = RDC_CITIES.some((c) => text.toLowerCase().includes(c));
+  const shortRefine = text.split(/\s+/).filter(Boolean).length <= 4;
+  if (hadPriorSearch && mentionsCity && (REFINE_INTENT.test(text) || shortRefine)) return true;
 
   return false;
 }

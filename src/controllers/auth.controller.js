@@ -10,10 +10,10 @@ import {
 import {
   sendOtpEmail,
   sendWelcomeEmail,
-  sendPasswordResetEmail,
+  sendPasswordResetOtpEmail,
   sendAdminNewSignupEmail,
   sendAccountApprovedEmail,
-  isSmtpConfigured
+  isEmailDeliveryConfigured
 } from '../services/email.service.js';
 import logger from '../utils/logger.js';
 import { AUTH_COOKIE_NAME } from '../config/auth.constants.js';
@@ -21,6 +21,8 @@ import { recordLoginActivity } from '../services/loginActivityService.js';
 
 const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || '24h';
 const BCRYPT_ROUNDS = 12;
+const RESET_OTP_RESEND_MS = 60_000;
+const RESET_OTP_MAX_ATTEMPTS = 5;
 
 function cookieOptions() {
   return {
@@ -44,6 +46,11 @@ function setAuthCookie(res, token) {
   res.cookie(AUTH_COOKIE_NAME, token, cookieOptions());
 }
 
+/** Signs a new session token, used when the e-mail address inside the token has just changed. */
+export function renewAuthCookie(res, user) {
+  setAuthCookie(res, signJwt(user));
+}
+
 function clearAuthCookie(res) {
   const { maxAge, ...opts } = cookieOptions();
   res.clearCookie(AUTH_COOKIE_NAME, opts);
@@ -53,13 +60,17 @@ function publicUser(user) {
   return {
     id: user._id,
     name: user.name,
+    firstName: user.firstName || '',
+    lastName: user.lastName || '',
     email: user.email,
     role: user.role,
+    avatar: user.avatar || '',
     isVerified: user.isVerified,
     isApproved: isUserApproved(user),
     alertsEnabled: user.alertsEnabled,
     alertFrequency: user.alertFrequency,
     keywords: user.keywords,
+    phone: user.phone || '',
     whatsappNumber: user.whatsappNumber,
     digestEmail: user.digestEmail,
     preferredLanguage: user.preferredLanguage
@@ -85,7 +96,7 @@ function pendingApprovalResponse(res, user) {
 
 function shouldRequireOtp() {
   if (process.env.AUTH_REQUIRE_OTP === 'false') return false;
-  return isSmtpConfigured();
+  return isEmailDeliveryConfigured();
 }
 
 async function sendOtpOrFail(email, otp) {
@@ -94,17 +105,13 @@ async function sendOtpOrFail(email, otp) {
   } catch (e) {
     logger.error(`OTP email delivery failed for ${email}: ${e.message}`);
     const err = new Error(
-      "Impossible d'envoyer le code OTP pour le moment. Vérifiez la configuration SMTP puis réessayez."
+      "Impossible d'envoyer le code OTP pour le moment. Vérifiez la configuration e-mail puis réessayez."
     );
     err.status = 502;
+    err.hint =
+      e.message ||
+      'SMTP App Password rejeté, ou Gmail OAuth non connecté. Ouvrez /api/gmail/system-connect avec le compte GMAIL_USER.';
     throw err;
-  }
-}
-
-async function sendPasswordResetOrFail(email, resetUrl) {
-  const result = await sendPasswordResetEmail(email, resetUrl);
-  if (!result.sent) {
-    throw new Error('SMTP non configuré');
   }
 }
 
@@ -164,7 +171,7 @@ export async function signup(req, res, next) {
       createdAt: user.createdAt
     }).catch((e) => logger.warn(`Admin signup notify failed: ${e.message}`));
 
-    if (isSmtpConfigured()) {
+    if (isEmailDeliveryConfigured()) {
       await sendWelcomeEmail(user.email, user.name, { pendingApproval: true }).catch((e) =>
         logger.warn(e.message)
       );
@@ -289,7 +296,7 @@ export async function resendOtp(req, res, next) {
       const wait = Math.ceil(60 - (now - new Date(user.lastOtpSentAt).getTime()) / 1000);
       return res.status(429).json({ message: `Patientez ${wait}s avant de renvoyer.` });
     }
-    if (!isSmtpConfigured()) {
+    if (!isEmailDeliveryConfigured()) {
       return res.status(503).json({ message: 'Envoi d’e-mail non configuré.' });
     }
     const otp = generateOtpDigits();
@@ -302,49 +309,104 @@ export async function resendOtp(req, res, next) {
   }
 }
 
+/**
+ * Step 1 of "forgot password": e-mail a 6-digit code to the account.
+ * Answers 404 EMAIL_NOT_FOUND when no account uses this address. Also used to resend the code.
+ */
 export async function forgotPassword(req, res, next) {
   try {
-    const { email } = req.body || {};
-    const msg = {
-      message:
-        'Si cette adresse existe dans notre système, vous recevrez un lien de réinitialisation sous peu.'
-    };
+    const email = String(req.body?.email || '').toLowerCase().trim();
     if (!email) {
-      return res.json(msg);
+      return res.status(400).json({ message: 'E-mail requis.' });
     }
 
-    const normalizedEmail = String(email).toLowerCase().trim();
-    const user = await User.findOne({ email: normalizedEmail });
+    const user = await User.findOne({ email });
     if (!user) {
-      logger.info(`Forgot password requested for unknown email: ${normalizedEmail}`);
-      return res.json(msg);
+      return res.status(404).json({
+        code: 'EMAIL_NOT_FOUND',
+        message: "Aucun compte n'est associé à cette adresse e-mail."
+      });
     }
 
-    if (!isSmtpConfigured()) {
-      logger.warn('Forgot password: SMTP not configured');
-      return res.json(msg);
+    if (!isEmailDeliveryConfigured()) {
+      return res.status(503).json({ message: "L'envoi d'e-mail n'est pas configuré." });
     }
 
+    const sentAgo = user.resetOtpLastSentAt
+      ? Date.now() - new Date(user.resetOtpLastSentAt).getTime()
+      : Infinity;
+    if (sentAgo < RESET_OTP_RESEND_MS) {
+      const wait = Math.ceil((RESET_OTP_RESEND_MS - sentAgo) / 1000);
+      return res.status(429).json({
+        code: 'OTP_COOLDOWN',
+        wait,
+        message: `Patientez ${wait}s avant de demander un nouveau code.`
+      });
+    }
+
+    const otp = generateOtpDigits();
+    user.assignResetOtp(hashOtp(otp));
+    await user.save();
+
+    try {
+      await sendPasswordResetOtpEmail(user.email, otp);
+    } catch (e) {
+      user.clearResetOtp();
+      user.resetOtpLastSentAt = null;
+      await user.save();
+      logger.error(`Password reset code email failed for ${user.email}: ${e.message}`);
+      return res.status(502).json({
+        message: "Impossible d'envoyer le code pour le moment. Réessayez dans quelques instants."
+      });
+    }
+
+    logger.info(`Password reset code sent to ${user.email}`);
+    return res.json({ ok: true, email: user.email });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
+ * Step 2: check the code. On success returns a short-lived key + token that
+ * `resetPassword` accepts to set the new password.
+ */
+export async function verifyResetOtp(req, res, next) {
+  try {
+    const email = String(req.body?.email || '').toLowerCase().trim();
+    const code = String(req.body?.code || '').trim();
+    if (!email || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ message: 'E-mail et code à 6 chiffres requis.' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user || !user.resetOtpHash) {
+      return res.status(400).json({ message: 'Code invalide ou expiré. Demandez un nouveau code.' });
+    }
+    if (!user.resetOtpExpiresAt || user.resetOtpExpiresAt < new Date()) {
+      user.clearResetOtp();
+      await user.save();
+      return res.status(400).json({ message: 'Code expiré. Demandez un nouveau code.' });
+    }
+
+    if (!verifyOtpHash(code, user.resetOtpHash)) {
+      user.resetOtpAttempts = (user.resetOtpAttempts || 0) + 1;
+      if (user.resetOtpAttempts >= RESET_OTP_MAX_ATTEMPTS) {
+        user.clearResetOtp();
+        await user.save();
+        return res
+          .status(429)
+          .json({ message: 'Trop de tentatives. Demandez un nouveau code.' });
+      }
+      await user.save();
+      return res.status(400).json({ message: 'Code incorrect.' });
+    }
+
+    user.clearResetOtp();
     const { key, rawToken } = generateResetKeyAndRawToken();
     user.setPasswordReset(key, hashResetToken(rawToken));
     await user.save();
-
-    const base = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-    const resetUrl = `${base}/reset-password?key=${encodeURIComponent(key)}&token=${encodeURIComponent(rawToken)}`;
-
-    try {
-      await sendPasswordResetOrFail(user.email, resetUrl);
-      logger.info(`Password reset email sent to ${user.email}`);
-    } catch (e) {
-      user.clearPasswordReset();
-      await user.save();
-      logger.error(`Password reset email failed for ${user.email}: ${e.message}`);
-      if (process.env.NODE_ENV === 'development') {
-        logger.warn(`[DEV] Lien de réinitialisation (email non envoyé): ${resetUrl}`);
-      }
-    }
-
-    return res.json(msg);
+    return res.json({ key, token: rawToken });
   } catch (e) {
     next(e);
   }
@@ -369,13 +431,19 @@ export async function resetPassword(req, res, next) {
       !user.passwordResetExpires ||
       user.passwordResetExpires < new Date()
     ) {
-      return res.status(400).json({ message: 'Lien invalide ou expiré.' });
+      return res
+        .status(400)
+        .json({ message: 'Session de réinitialisation expirée. Recommencez la procédure.' });
     }
     if (!verifyResetTokenHash(String(token), user.passwordResetTokenHash)) {
-      return res.status(400).json({ message: 'Lien invalide ou expiré.' });
+      return res
+        .status(400)
+        .json({ message: 'Session de réinitialisation invalide. Recommencez la procédure.' });
     }
     user.password = await bcrypt.hash(password, BCRYPT_ROUNDS);
     user.clearPasswordReset();
+    user.clearResetOtp();
+    user.clearOtp();
     await user.save();
     clearAuthCookie(res);
     return res.json({ message: 'Mot de passe mis à jour.' });

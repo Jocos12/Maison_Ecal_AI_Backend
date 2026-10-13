@@ -3,11 +3,16 @@ import logger from '../utils/logger.js';
 export function errorHandler(err, req, res, next) {
   logger.error(err.stack || err.message);
   const status = err.status || err.response?.status || 500;
-  const message = err.message || err.response?.data?.message || 'Internal Server Error';
-  res.status(status).json({
-    message,
-    ...(err.diagnostics && { diagnostics: err.diagnostics }),
-    ...(err.hint && { hint: err.hint }),
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  });
+  const isProd = process.env.NODE_ENV === 'production';
+  const message =
+    isProd && status >= 500
+      ? 'Internal Server Error'
+      : err.message || err.response?.data?.message || 'Internal Server Error';
+  const payload = { message };
+  if (!isProd) {
+    if (err.diagnostics) payload.diagnostics = err.diagnostics;
+    if (err.hint) payload.hint = err.hint;
+    if (err.stack) payload.stack = err.stack;
+  }
+  res.status(status).json(payload);
 }

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import GmailToken from '../models/GmailToken.js';
+import SystemSetting from '../models/SystemSetting.js';
 import {
   GMAIL_SCOPES,
   getGmailConfigDiagnostics,
@@ -7,6 +8,10 @@ import {
   isGmailConfigured
 } from '../config/gmail.js';
 import { createOAuth2Client, gmailApiRequest } from './gmailOAuth.js';
+import logger from '../utils/logger.js';
+
+export const SYSTEM_MAIL_OAUTH_STATE = 'system-mail';
+const SYSTEM_MAIL_SETTING_KEY = 'gmail_system_mail';
 
 function assertGmailConfigured() {
   if (isGmailConfigured()) return;
@@ -29,6 +34,174 @@ export function buildGmailAuthUrl(userId) {
     prompt: 'consent',
     state: String(userId || '')
   });
+}
+
+/** One-time OAuth for system auth e-mails (OTP, reset, welcome). No login required. */
+export function buildSystemMailAuthUrl() {
+  return buildGmailAuthUrl(SYSTEM_MAIL_OAUTH_STATE);
+}
+
+function cleanRefreshToken(value) {
+  if (value == null) return '';
+  return String(value).trim().replace(/^['"]|['"]$/g, '');
+}
+
+async function loadSystemMailCredentials() {
+  const cfg = gmailConfig();
+  const envRefresh = cleanRefreshToken(process.env.GMAIL_REFRESH_TOKEN);
+  if (envRefresh) {
+    return {
+      source: 'env',
+      userEmail: cfg.user,
+      credentials: { refresh_token: envRefresh }
+    };
+  }
+
+  const setting = await SystemSetting.findOne({ key: SYSTEM_MAIL_SETTING_KEY }).lean();
+  const stored = setting?.value || {};
+  const refresh =
+    cleanRefreshToken(stored.refresh_token) || cleanRefreshToken(stored.refreshToken);
+  const access = cleanRefreshToken(stored.access_token) || cleanRefreshToken(stored.accessToken);
+  if (refresh || access) {
+    return {
+      source: 'system_setting',
+      userEmail: stored.userEmail || cfg.user,
+      credentials: {
+        access_token: access || undefined,
+        refresh_token: refresh || undefined,
+        scope: stored.scope,
+        token_type: stored.token_type || stored.tokenType,
+        expiry_date: stored.expiry_date || stored.expiryDate
+      }
+    };
+  }
+
+  const tokenDoc = await GmailToken.findOne({
+    userEmail: new RegExp(`^${cfg.user.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+  })
+    .sort({ updatedAt: -1 })
+    .lean();
+  if (tokenDoc) {
+    return {
+      source: 'gmail_token',
+      userId: tokenDoc.userId,
+      userEmail: tokenDoc.userEmail || cfg.user,
+      credentials: tokenDocToCredentials(tokenDoc)
+    };
+  }
+
+  return null;
+}
+
+export async function isSystemMailReady() {
+  if (!isGmailConfigured()) return false;
+  const creds = await loadSystemMailCredentials();
+  return Boolean(creds?.credentials?.refresh_token || creds?.credentials?.access_token);
+}
+
+export async function getSystemMailStatus() {
+  const configured = isGmailConfigured();
+  const cfg = gmailConfig();
+  if (!configured) {
+    return { configured: false, connected: false, userEmail: cfg.user, connectPath: null };
+  }
+  const ready = await isSystemMailReady();
+  return {
+    configured: true,
+    connected: ready,
+    userEmail: cfg.user,
+    connectPath: '/api/gmail/system-connect'
+  };
+}
+
+export async function exchangeCodeForSystemMail(code) {
+  if (!code) throw Object.assign(new Error('Code OAuth Gmail manquant.'), { status: 400 });
+  assertGmailConfigured();
+  const tokens = await getTokensFromCode(code);
+  const cfg = gmailConfig();
+  const existing = await SystemSetting.findOne({ key: SYSTEM_MAIL_SETTING_KEY }).lean();
+  const prev = existing?.value || {};
+  const refresh_token = tokens.refresh_token || prev.refresh_token || prev.refreshToken;
+  if (!refresh_token) {
+    throw Object.assign(
+      new Error(
+        'Aucun refresh_token reçu. Réessayez en révoquant l’accès M-ECAL sur https://myaccount.google.com/permissions puis reconnectez.'
+      ),
+      { status: 400 }
+    );
+  }
+  const value = {
+    userEmail: cfg.user,
+    access_token: tokens.access_token,
+    refresh_token,
+    scope: tokens.scope,
+    token_type: tokens.token_type,
+    expiry_date: tokens.expiry_date,
+    connectedAt: new Date().toISOString()
+  };
+  await SystemSetting.findOneAndUpdate(
+    { key: SYSTEM_MAIL_SETTING_KEY },
+    { $set: { value } },
+    { upsert: true, new: true }
+  );
+  logger.info('System mail Gmail OAuth connected', { userEmail: cfg.user });
+  return { userEmail: cfg.user };
+}
+
+async function getSystemMailClient() {
+  assertGmailConfigured();
+  const loaded = await loadSystemMailCredentials();
+  if (!loaded) {
+    throw Object.assign(
+      new Error(
+        'Mail système Gmail non connecté. Ouvrez /api/gmail/system-connect avec le compte GMAIL_USER.'
+      ),
+      { status: 503, code: 'gmail_system_not_connected' }
+    );
+  }
+  if (loaded.userId) {
+    return getAuthenticatedClient(loaded.userId);
+  }
+  const oauth2 = createOAuth2Client();
+  oauth2.setCredentials(loaded.credentials);
+  oauth2.on('tokens', async (newTokens) => {
+    if (loaded.source !== 'system_setting') return;
+    const existing = await SystemSetting.findOne({ key: SYSTEM_MAIL_SETTING_KEY }).lean();
+    const prev = existing?.value || {};
+    await SystemSetting.findOneAndUpdate(
+      { key: SYSTEM_MAIL_SETTING_KEY },
+      {
+        $set: {
+          value: {
+            ...prev,
+            access_token: newTokens.access_token || prev.access_token,
+            refresh_token: newTokens.refresh_token || prev.refresh_token || prev.refreshToken,
+            expiry_date: newTokens.expiry_date || prev.expiry_date,
+            scope: newTokens.scope || prev.scope,
+            token_type: newTokens.token_type || prev.token_type
+          }
+        }
+      },
+      { upsert: true }
+    );
+  });
+  return oauth2;
+}
+
+/** Send HTML mail via Gmail API (works when SMTP App Password is rejected). */
+export async function sendSystemHtmlEmail({ to, subject, html }) {
+  const cfg = gmailConfig();
+  const oauth2 = await getSystemMailClient();
+  const raw = encodeRawEmail([
+    `From: M-ECAL <${cfg.user}>`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    html
+  ]);
+  return gmailApiRequest(oauth2, 'post', '/users/me/messages/send', { data: { raw } });
 }
 
 export async function getTokensFromCode(code) {
@@ -262,18 +435,64 @@ function encodeRawEmail(lines) {
     .replace(/=+$/, '');
 }
 
-export async function sendMessage(userId, { to, subject, body }) {
+function encodeHeaderUtf8(value) {
+  const s = String(value || '');
+  if (!/[^\x00-\x7F]/.test(s)) return s;
+  return `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=`;
+}
+
+function wrapBase64(b64) {
+  return String(b64 || '').replace(/.{1,76}/g, '$&\r\n').trim();
+}
+
+export async function sendMessage(userId, { to, subject, body, attachments = [] }) {
   const cfg = gmailConfig();
   const oauth2 = await getAuthenticatedClient(userId);
-  const raw = encodeRawEmail([
-    `From: M-ECAL <${cfg.user}>`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/html; charset=utf-8',
-    '',
-    body
-  ]);
+  const from = cfg.user;
+  const encodedSubject = encodeHeaderUtf8(subject);
+
+  let lines;
+  if (attachments.length) {
+    const boundary = `mecal_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    lines = [
+      `From: M-ECAL <${from}>`,
+      `To: ${to}`,
+      `Subject: ${encodedSubject}`,
+      'MIME-Version: 1.0',
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      wrapBase64(Buffer.from(body || '', 'utf8').toString('base64'))
+    ];
+    for (const att of attachments) {
+      const filename = String(att.filename || 'piece-jointe').replace(/"/g, '');
+      const mime = att.mimeType || 'application/octet-stream';
+      lines.push(
+        `--${boundary}`,
+        `Content-Type: ${mime}; name="${filename}"`,
+        'Content-Transfer-Encoding: base64',
+        `Content-Disposition: attachment; filename="${filename}"`,
+        '',
+        wrapBase64(att.contentBase64)
+      );
+    }
+    lines.push(`--${boundary}--`);
+  } else {
+    lines = [
+      `From: M-ECAL <${from}>`,
+      `To: ${to}`,
+      `Subject: ${encodedSubject}`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      body
+    ];
+  }
+
+  const raw = encodeRawEmail(lines);
   return gmailApiRequest(oauth2, 'post', '/users/me/messages/send', { data: { raw } });
 }
 

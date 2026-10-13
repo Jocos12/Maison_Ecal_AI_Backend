@@ -1,6 +1,8 @@
+import * as cheerio from 'cheerio';
 import logger from '../utils/logger.js';
 import { isJobPosting, classifyMecalCategory } from '../config/businessRules.js';
-import { fetchJson } from './utils.js';
+import { fetchHtml, fetchJson } from './utils.js';
+import { enrichItemDates, parseLooseDate } from './dateExtract.js';
 
 const API_BASE = 'https://api.reliefweb.int/v2/jobs';
 const LIMIT = 50;
@@ -31,7 +33,7 @@ const CONSULTANCY_TEXT_HINTS = [
 ];
 
 function reliefWebAppName() {
-  return (process.env.RELIEFWEB_APPNAME || 'mecal-monitor').trim();
+  return (process.env.RELIEFWEB_APPNAME || 'mecal-monitor-maison-ecal-rdc').trim();
 }
 
 function mapReliefWebRow(row) {
@@ -139,10 +141,103 @@ export async function scrapeReliefWeb() {
       }
     }
 
-    logger.info(`ReliefWeb consultancies: ${merged.length} notices after service filter`);
+    const htmlJobs = await scrapeReliefWebJobsHtml();
+    for (const item of htmlJobs) {
+      if (!item.sourceUrl || seen.has(item.sourceUrl)) continue;
+      seen.add(item.sourceUrl);
+      merged.push(item);
+    }
+
+    const rssItems = await scrapeReliefWebRss();
+    for (const item of rssItems) {
+      if (!item.sourceUrl || seen.has(item.sourceUrl)) continue;
+      seen.add(item.sourceUrl);
+      merged.push(item);
+    }
+
+    logger.info(`ReliefWeb: ${merged.length} notices (jobs API + RSS RDC logistique)`);
     return merged;
   } catch (e) {
     logger.warn(`ReliefWeb API: ${e.message}`);
+    return [];
+  }
+}
+
+async function scrapeReliefWebJobsHtml() {
+  const urls = [
+    'https://reliefweb.int/jobs?advanced-search=%28C.COD%29&search=consultanc%20OR%20logistics%20OR%20%22supply%20chain%22',
+    'https://reliefweb.int/jobs?advanced-search=%28C.COD%29'
+  ];
+  const items = [];
+  const seen = new Set();
+  for (const url of urls) {
+    try {
+      const html = await fetchHtml(url);
+      const $ = cheerio.load(html);
+      $('a[href*="/job/"]').each((_, el) => {
+        const href = $(el).attr('href') || '';
+        const title = $(el).text().replace(/\s+/g, ' ').trim();
+        if (!title || title.length < 20) return;
+        const sourceUrl = href.startsWith('http') ? href : `https://reliefweb.int${href}`;
+        if (seen.has(sourceUrl)) return;
+        seen.add(sourceUrl);
+        const card = $(el).closest('article, li, .rw-river-article, .views-row');
+        const extra = card.length ? card.text().replace(/\s+/g, ' ').trim() : title;
+        items.push({
+          title,
+          description: extra,
+          organization: 'ReliefWeb',
+          sourceUrl,
+          platform: 'ReliefWeb',
+          location: 'RDC — Democratic Republic of the Congo',
+          skipDateEnrich: true
+        });
+      });
+    } catch (e) {
+      logger.warn(`ReliefWeb jobs HTML: ${e.message}`);
+    }
+  }
+  logger.info(`ReliefWeb jobs HTML: ${items.length} liens`);
+  return items;
+}
+
+const DEFAULT_RSS =
+  'https://reliefweb.int/updates/rss.xml?search=%22Democratic%20Republic%20of%20the%20Congo%22%20(logistics%20OR%20transport%20OR%20%22supply%20chain%22)';
+
+async function scrapeReliefWebRss() {
+  const url = (process.env.RELIEFWEB_RSS_URL || DEFAULT_RSS).trim();
+  try {
+    const xml = await fetchHtml(url);
+    const $ = cheerio.load(xml, { xmlMode: true });
+    const items = [];
+    $('item').each((_, el) => {
+      const title = $(el).find('title').first().text().replace(/\s+/g, ' ').trim();
+      const link = $(el).find('link').first().text().trim() || $(el).find('guid').first().text().trim();
+      const description = $(el)
+        .find('description')
+        .first()
+        .text()
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const pubDate = $(el).find('pubDate').first().text().trim();
+      if (!title || !link) return;
+      items.push({
+          title,
+          description,
+          organization: 'ReliefWeb',
+          postedDate: parseLooseDate(pubDate),
+          deadline: null,
+          skipDateEnrich: true,
+          sourceUrl: link,
+          platform: 'ReliefWeb',
+          location: 'RDC — Democratic Republic of the Congo'
+        });
+    });
+    logger.info(`ReliefWeb RSS: ${items.length} items`);
+    return items;
+  } catch (e) {
+    logger.warn(`ReliefWeb RSS: ${e.message}`);
     return [];
   }
 }

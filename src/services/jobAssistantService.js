@@ -1,11 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { callAIWithFallback } from './aiService.js';
+import { callAIWithFallback, isComplexAiTask } from './aiService.js';
 import { searchJobsWithAI } from './jobSearchService.js';
-import { renderDocumentPdf } from './jobDocumentPdfService.js';
+import { renderDocumentPdf, isPlaceholderJobTitle, documentHeading } from './jobDocumentPdfService.js';
 import JobAssistantDocument from '../models/JobAssistantDocument.js';
 import JobApplicationLog from '../models/JobApplicationLog.js';
+import { getJobAssistantProfile } from './jobAssistantProfileService.js';
 import { sendMessage } from './gmailService.js';
 import {
   extractSearchParams,
@@ -13,32 +14,65 @@ import {
   shouldRunSearch
 } from './jobContextService.js';
 import { detectMessageLanguage } from '../utils/detectMessageLanguage.js';
+import { ensureMaisonEcalMention } from '../utils/maisonEcalLetter.js';
+import { stripMarkdown } from '../utils/stripMarkdown.js';
+import { answerInLocalMode } from './localModeAssistant.js';
 import {
   buildJobAssistantSystemPrompt,
   buildJobSearchSummaryPrompt,
   JOB_DOCUMENT_CV_PROMPT,
-  JOB_DOCUMENT_LETTER_PROMPT
+  JOB_DOCUMENT_LETTER_PROMPT,
+  JOB_DOCUMENT_RECO_PROMPT,
+  JOB_DOCUMENT_CV_REVIEW_PROMPT
 } from '../prompts/jobAssistantPrompt.js';
 import logger from '../utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const JOB_DOCS_DIR = path.join(__dirname, '../../uploads/job-assistant');
 
+function formatJobsForChat(jobs = []) {
+  if (!jobs?.length) return '';
+  return jobs
+    .slice(0, 18)
+    .map(
+      (j, i) =>
+        `${i + 1}. ${j.title} | org: ${j.organization || '—'} | ville: ${j.city || '—'} | source: ${j.platform || j.source || '—'} | lien: ${j.sourceUrl || 'N/A'}`
+    )
+    .join('\n');
+}
+
+function collectConversationJobs(messages = []) {
+  const seen = new Set();
+  const jobs = [];
+  for (const m of messages) {
+    for (const job of m.jobs || []) {
+      const key = job.sourceUrl || `${job.title}|${job.organization}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      jobs.push(job);
+    }
+  }
+  return jobs;
+}
+
+const CV_FIX_INTENT = /corrige.{0,20}cv|correct.{0,20}cv|am[ée]liore.{0,20}cv|fix.{0,12}cv|revise.{0,12}cv/i;
+const RECO_INTENT = /lettre de recommandation|recommendation letter|lettre de r[ée]f[ée]rence/i;
+
 async function ensureDocsDir() {
   await fs.mkdir(JOB_DOCS_DIR, { recursive: true });
 }
 
-async function safeCallAIWithFallback(prompt, systemPrompt, maxTokens) {
+async function safeCallAIWithFallback(prompt, systemPrompt, maxTokens, options = {}) {
   try {
-    return await callAIWithFallback(prompt, systemPrompt, maxTokens);
+    return await callAIWithFallback(prompt, systemPrompt, maxTokens, options);
   } catch (err) {
     logger.warn(`Tous les providers IA ont échoué — bascule locale: ${err.message}`);
     return null;
   }
 }
 
-async function safeCallAIText(prompt, systemPrompt, maxTokens) {
-  const result = await safeCallAIWithFallback(prompt, systemPrompt, maxTokens);
+async function safeCallAIText(prompt, systemPrompt, maxTokens, options = {}) {
+  const result = await safeCallAIWithFallback(prompt, systemPrompt, maxTokens, options);
   return result?.text?.trim() || null;
 }
 
@@ -104,46 +138,59 @@ RÉFÉRENCES
 ${profile.projectReferences || profile.references || 'Sur demande'}`;
 }
 
-export async function chatWithJobAssistant({ messages = [], locale = 'fr', systemPrompt = null } = {}) {
+export async function chatWithJobAssistant({
+  messages = [],
+  locale = 'fr',
+  systemPrompt = null,
+  userId = null
+} = {}) {
   const history = messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .slice(-40)
     .map((m) => `${m.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${m.content}`)
     .join('\n');
 
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+  const knownJobs = collectConversationJobs(messages);
+  const jobsBlock = formatJobsForChat(knownJobs);
+  const complex = isComplexAiTask(lastUser);
   const chatRules = `
-RAPPEL : Tu ne dois JAMAIS inventer d'offres d'emploi, d'organisations, de liens ou de dates.
-Si l'utilisateur demande des offres, une recherche réelle sera lancée séparément — ne cite aucune offre concrète ici.
-Réponds directement et brièvement à la question. Utilise l'historique pour le contexte (ville, poste déjà mentionnés).`;
+PRIORITÉ : réponds D'ABORD (1-2 phrases) à la question actuelle, en tenant compte de l'historique (ville, poste, « are you sure », etc.). Ne redemande pas des précisions génériques si le contexte suffit.
 
-  const prompt = `${history ? `Historique complet de la conversation:\n${history}\n\n` : ''}${chatRules}`;
+OFFRES RÉELLES déjà trouvées dans cette conversation (tu PEUX et DOIS les citer ; n'invente RIEN hors de cette liste) :
+${jobsBlock || '(aucune offre listée pour l’instant — n’invente pas d’offre ; propose de lancer une recherche si besoin)'}
+
+Si la question vérifie un lieu (ex. Bukavu), filtre ces offres par ville et confirme ou infirme avec titres + sources.
+N'invente jamais d'organisation, de lien ou de date.`;
+
+  const prompt = `${history ? `Historique de la conversation:\n${history}\n\n` : ''}QUESTION ACTUELLE:\n${lastUser}\n\n${chatRules}`;
 
   const baseSystemPrompt = buildJobAssistantSystemPrompt(undefined, locale);
   const mergedSystemPrompt = systemPrompt
     ? `${baseSystemPrompt}\n\n${systemPrompt}`
     : baseSystemPrompt;
 
-  const result = await safeCallAIWithFallback(prompt, mergedSystemPrompt, 2000);
+  const result = await safeCallAIWithFallback(
+    prompt,
+    mergedSystemPrompt,
+    complex ? 4096 : 2048,
+    { mode: 'full' }
+  );
   if (result) {
     return { reply: result.text, provider: result.provider };
   }
 
-  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
-  const offlineIntro =
-    locale === 'en'
-      ? `I'm the M-ECAL agent (local mode — Claude, Groq and Gemini unavailable).\n\nI can still help you:\n• **Search jobs** logistics DRC\n• **Generate / fix CV** and cover letters (PDF)\n• **Apply** and track applications\n• **Answer** about M-ECAL menu and pages\n\n`
-      : `Je suis l'agent M-ECAL (mode local — Claude, Groq et Gemini indisponibles).\n\nJe peux quand même vous aider :\n• **Chercher des offres** logistique RDC\n• **Générer / corriger CV** et lettres (PDF)\n• **Postuler** et analyser vos candidatures\n• **Répondre** sur le menu et les pages M-ECAL\n\n`;
+  const local = await answerInLocalMode({
+    messages,
+    lastUser,
+    locale,
+    userId,
+    knownJobs
+  });
   return {
-    reply:
-      offlineIntro +
-      (lastUser
-        ? locale === 'en'
-          ? `Your question: « ${lastUser.slice(0, 120)} »\n\nRephrase or use the quick action buttons above.`
-          : `Votre question : « ${lastUser.slice(0, 120)} »\n\nReformulez ou utilisez les boutons rapides ci-dessus.`
-        : locale === 'en'
-          ? 'Rephrase or use the quick action buttons above.'
-          : 'Reformulez ou utilisez les boutons rapides ci-dessus.'),
-    provider: 'local'
+    reply: local.reply,
+    provider: 'local',
+    jobs: local.jobs || []
   };
 }
 
@@ -152,11 +199,90 @@ export async function processConversationMessage({
   userMessage,
   sources = null,
   locale: localeOverride = null,
-  systemPrompt = null
+  systemPrompt = null,
+  userId = null
 } = {}) {
   const history = messages.filter((m) => m.role === 'user' || m.role === 'assistant');
   const priorMessages = history.slice(0, -1);
   const locale = localeOverride || detectMessageLanguage(userMessage, history);
+  const knownJobs = collectConversationJobs(history);
+  const lastJob = knownJobs[0] || null;
+
+  if (userId && CV_FIX_INTENT.test(userMessage)) {
+    const { profile, cv } = await getJobAssistantProfile(userId);
+    const hasCv = Boolean(profile.fullName || profile.experience || cv?.fileName);
+    if (!hasCv) {
+      return {
+        content:
+          locale === 'en'
+            ? 'Import your CV first (same file as the dashboard Agent, e.g. True CV COURBON.docx), then ask me to correct it.'
+            : 'Importez d’abord votre CV (le même que sur l’Agent du dashboard, ex. True CV COURBON.docx), puis redemandez « corrige mon CV ».',
+        isSearch: false,
+        provider: 'context'
+      };
+    }
+    const review = await safeCallAIText(
+      `${JOB_DOCUMENT_CV_REVIEW_PROMPT}\n\nCV importé : ${cv?.fileName || 'profil'}\n\nPROFIL:\n${JSON.stringify(profile, null, 2)}`,
+      buildJobAssistantSystemPrompt(undefined, locale),
+      1800,
+      { mode: 'full' }
+    );
+    const suggestions =
+      review ||
+      'Suggestions rapides : 1) Accroche ciblée logistique RDC. 2) Verbes d’action dans l’expérience. 3) Dates cohérentes. 4) Compétences mesurables.';
+    try {
+      const doc = await generateJobDocument({
+        userId,
+        type: 'cv',
+        job: lastJob || { title: 'Profil logistique M-ECAL', organization: 'Maison ECAL', city: 'RDC' },
+        profile,
+        mode: 'correct',
+        locale
+      });
+      return {
+        content: `${suggestions}\n\nUne version corrigée du CV est prête au téléchargement.`,
+        document: doc,
+        provider: doc.provider || 'ai',
+        isSearch: false
+      };
+    } catch (err) {
+      return { content: suggestions, isSearch: false, provider: 'ai' };
+    }
+  }
+
+  if (RECO_INTENT.test(userMessage)) {
+    const nameMatch = userMessage.match(
+      /(?:recommandataire|recommander|de la part de|from)\s*[:\-]?\s*([A-ZÀ-Ÿ][a-zà-ÿ]+(?:\s+[A-ZÀ-Ÿ][a-zà-ÿ]+){0,3})/i
+    );
+    const recommenderName = nameMatch?.[1]?.trim();
+    if (!recommenderName) {
+      return {
+        content:
+          locale === 'en'
+            ? 'To draft a recommendation letter I need: (1) recommender full name, (2) their role/organisation, (3) relationship and period (e.g. manager at X, 2022–2024). Reply with those three points.'
+            : 'Pour une lettre de recommandation, indiquez : (1) le nom du recommandataire, (2) sa fonction / organisation, (3) le contexte (lien, période). Ex. « Recommandataire : Marie Kabila, coordinatrice logistique UNICEF, manager de 2022 à 2024 ».',
+        isSearch: false,
+        provider: 'context'
+      };
+    }
+    if (userId) {
+      const { profile } = await getJobAssistantProfile(userId);
+      const doc = await generateJobDocument({
+        userId,
+        type: 'recommendation',
+        job: lastJob || { title: 'Mission logistique', organization: 'Organisation partenaire', city: 'RDC' },
+        profile,
+        locale,
+        extra: { recommenderName, context: userMessage }
+      });
+      return {
+        content: doc.message,
+        document: doc,
+        isSearch: false,
+        provider: 'ai'
+      };
+    }
+  }
 
   if (shouldRunSearch(userMessage, priorMessages)) {
     const { query, city, role, allRdc, broadenSearch } = extractSearchParams(
@@ -217,59 +343,120 @@ export async function processConversationMessage({
     return { content: parts.join(' '), isSearch: false, provider: 'context' };
   }
 
-  const { reply, provider } = await chatWithJobAssistant({ messages: history, locale, systemPrompt });
-  return { content: reply, provider, isSearch: false };
+  const { reply, provider, jobs: localJobs } = await chatWithJobAssistant({
+    messages: history,
+    locale,
+    systemPrompt,
+    userId
+  });
+  return { content: reply, provider, isSearch: false, jobs: localJobs || [] };
 }
 
-export async function generateJobDocument({ userId, type, job, profile, mode, locale = 'fr' }) {
-  if (!['cv', 'letter'].includes(type)) {
-    throw new Error('Type de document invalide (cv ou letter).');
+export async function generateJobDocument({
+  userId,
+  type,
+  job,
+  profile,
+  mode,
+  locale = 'fr',
+  extra = {}
+}) {
+  if (!['cv', 'letter', 'recommendation'].includes(type)) {
+    throw new Error('Type de document invalide (cv, letter ou recommendation).');
   }
-  if (!job?.title) {
-    throw new Error('Offre cible requise.');
+
+  let stored = { profile: {}, cv: null };
+  if (userId) {
+    try {
+      stored = await getJobAssistantProfile(userId);
+    } catch {
+      stored = { profile: {}, cv: null };
+    }
+  }
+  const mergedProfile = { ...(stored.profile || {}), ...(profile || {}) };
+  const placeholder = isPlaceholderJobTitle(job?.title);
+  const targetJob =
+    job?.title && !placeholder
+      ? job
+      : {
+          title: type === 'cv' ? 'Profil logistique' : 'Candidature logistique',
+          organization: job?.organization && !placeholder ? job.organization : '',
+          city: job?.city || 'RDC',
+          sourceUrl: placeholder ? '' : job?.sourceUrl || ''
+        };
+
+  if (type === 'letter' && (!job?.title || placeholder)) {
+    throw new Error('Sélectionnez une offre réelle (pas un lien de plateforme) pour générer la lettre.');
+  }
+
+  if (type === 'recommendation') {
+    if (!extra.recommenderName || !String(extra.context || extra.recommenderName).trim()) {
+      const err = new Error(
+        'Pour une lettre de recommandation, indiquez le nom du recommandataire et le contexte (fonction, lien, période).'
+      );
+      err.status = 400;
+      err.code = 'NEED_RECO_INFO';
+      throw err;
+    }
   }
 
   const docPrompt =
-    type === 'cv' ? JOB_DOCUMENT_CV_PROMPT : JOB_DOCUMENT_LETTER_PROMPT;
+    type === 'cv'
+      ? JOB_DOCUMENT_CV_PROMPT
+      : type === 'recommendation'
+        ? JOB_DOCUMENT_RECO_PROMPT
+        : JOB_DOCUMENT_LETTER_PROMPT;
   const correctionNote =
     mode === 'correct' && type === 'cv'
-      ? '\n\nMODE CORRECTION : améliore, structure et optimise le CV à partir du profil (formulation professionnelle, clarté, mots-clés logistique / supply chain RDC). Corrige les faiblesses sans inventer de fausses expériences.'
+      ? '\n\nMODE CORRECTION : améliore formulations, structure et clarté à partir du CV importé. Ne change aucune date, employeur, diplôme ou compétence factuelle. N’invente rien.'
       : '';
 
   const userPrompt = `${docPrompt}${correctionNote}
 
-OFFRE :
-- Poste : ${job.title}
-- Organisation : ${job.organization || 'N/A'}
-- Ville : ${job.city || 'RDC'}
-- Lien : ${job.sourceUrl || 'N/A'}
+OFFRE / CIBLE :
+- Poste : ${targetJob.title}
+- Organisation : ${targetJob.organization || 'N/A'}
+- Ville : ${targetJob.city || 'RDC'}
+- Lien : ${targetJob.sourceUrl || 'N/A'}
 
-PROFIL UTILISATEUR :
-${JSON.stringify(profile || {}, null, 2)}`;
+CV IMPORTÉ : ${stored.cv?.fileName || mergedProfile.cvFileName || 'profil saisi manuellement'}
 
-  const textContent =
-    (await safeCallAIText(userPrompt, buildJobAssistantSystemPrompt(undefined, locale), 2500)) ||
-    buildOfflineDocument(type, job, profile || {}, mode);
+PROFIL UTILISATEUR (ne pas dénaturer les faits) :
+${JSON.stringify(mergedProfile, null, 2)}
+
+${type === 'recommendation' ? `RECOMMANDATAIRE : ${extra.recommenderName}\nCONTEXTE : ${extra.context || extra.recommenderRole || ''}` : ''}`;
+
+  const textContentRaw =
+    (await safeCallAIText(userPrompt, buildJobAssistantSystemPrompt(undefined, locale), 4096, {
+      mode: 'full'
+    })) ||
+    buildOfflineDocument(type === 'recommendation' ? 'letter' : type, targetJob, mergedProfile, mode);
+
+  let textContent = stripMarkdown(textContentRaw);
+  if (type === 'letter' || type === 'recommendation') {
+    textContent = ensureMaisonEcalMention(textContent);
+  }
 
   await ensureDocsDir();
-  const safeTitle = (job.title || 'document').replace(/[^\w\s-]/g, '').slice(0, 40);
-  const fileName = `${type}-${safeTitle}-${Date.now()}.pdf`;
+  const fileName = `${type}-${Date.now()}.pdf`;
   const filePath = path.join(JOB_DOCS_DIR, fileName);
 
   await renderDocumentPdf({
     filePath,
-    title: type === 'cv' ? `CV — ${job.title}` : `Lettre de motivation — ${job.title}`,
+    title: documentHeading(type),
     content: textContent,
-    type
+    type: type === 'cv' ? 'cv' : type === 'recommendation' ? 'recommendation' : 'letter',
+    jobTitle: placeholder ? '' : targetJob.title,
+    organization: targetJob.organization || ''
   });
 
   const doc = await JobAssistantDocument.create({
     userId,
-    documentType: type,
-    jobTitle: job.title,
-    organization: job.organization || '',
-    sourceUrl: job.sourceUrl || '',
-    city: job.city || '',
+    documentType: type === 'recommendation' ? 'letter' : type,
+    jobTitle: targetJob.title,
+    organization: targetJob.organization || '',
+    sourceUrl: targetJob.sourceUrl || '',
+    city: targetJob.city || '',
     textContent,
     filePath,
     fileName,
@@ -284,7 +471,11 @@ ${JSON.stringify(profile || {}, null, 2)}`;
     textContent,
     preview: textContent.slice(0, 500) + (textContent.length > 500 ? '…' : ''),
     message:
-      'Document généré. Téléchargez-le ci-dessous. Aucun envoi automatique — utilisez le bouton de confirmation pour soumettre.'
+      type === 'cv'
+        ? 'CV PDF généré à partir du CV importé. Téléchargez le fichier — aucun envoi automatique.'
+        : type === 'recommendation'
+          ? 'Lettre de recommandation PDF générée (mention Maison ECAL). Téléchargez le fichier.'
+          : 'Lettre de motivation PDF générée (mention Maison ECAL). Téléchargez le fichier.'
   };
 }
 

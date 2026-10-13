@@ -1,6 +1,9 @@
 import axios from 'axios';
 import logger from '../utils/logger.js';
-import { callClaudeJson, callClaudeText } from './anthropicService.js';
+import { callClaudeJson } from './anthropicService.js';
+import { callAIText } from './aiService.js';
+import { ensureMaisonEcalMention, MAISON_ECAL_LETTER_MENTION } from '../utils/maisonEcalLetter.js';
+import { stripMarkdown } from '../utils/stripMarkdown.js';
 import {
   SERVICES_MECAL,
   NON_LOGISTICS_EXCLUSIONS,
@@ -199,45 +202,78 @@ Réponds UNIQUEMENT en JSON :
 }
 
 export async function generateMotivationLetter(opp, profile = {}) {
-  const fallback = `Madame, Monsieur,\n\nLa Maison d'Études, de Conseil et d'Assistance Logistique (M-ECAL) vous adresse sa manifestation d'intérêt pour ${opp.title} à ${opp.ville || opp.location || 'RDC'}.\n\nNotre équipe accompagne les organisations en RDC dans les formations logistiques, la formation des chauffeurs, les études de marchés, les inventaires d'actifs et la consultance logistique.\n\nNous serions honorés d'échanger avec ${opp.organization || 'votre organisation'} afin de préciser votre besoin et de proposer une approche adaptée.\n\nDirection M-ECAL\nmaisonecal@gmail.com`;
-  const prompt = `Rédige une lettre de motivation professionnelle en français pour M-ECAL.
-
-PROFIL M-ECAL :
+  const fallback = `Madame, Monsieur,\n\nLa Maison d'Études, de Conseil et d'Assistance Logistique (M-ECAL) vous adresse sa manifestation d'intérêt pour ${opp.title} à ${opp.ville || opp.location || 'RDC'}.\n\nNotre équipe accompagne les organisations en RDC dans les formations logistiques, la formation des chauffeurs, les études de marchés, les inventaires d'actifs et la consultance logistique.\n\nNous serions honorés d'échanger avec ${opp.organization || 'votre organisation'} afin de préciser votre besoin et de proposer une approche adaptée.\n\n${profile.fullName || 'Direction M-ECAL'}\n${profile.email || 'maisonecal@gmail.com'}\n\n${MAISON_ECAL_LETTER_MENTION}`;
+  const cvBlock = profile.fullName
+    ? `CV IMPORTÉ (${profile.cvFileName || 'profil candidat'}) :
+- Nom : ${profile.fullName}
+- Email : ${profile.email || '—'}
+- Téléphone : ${profile.phone || '—'}
+- Formation : ${profile.education || '—'}
+- Expérience : ${profile.experience || '—'}
+- Compétences : ${Array.isArray(profile.skills) ? profile.skills.join(', ') : profile.skills || '—'}
+- Langues : ${profile.languages || '—'}`
+    : `PROFIL SOCIÉTÉ M-ECAL :
 - Nom : ${profile.companyName || "Maison d'Études, de Conseil et d'Assistance Logistique"}
-- Spécialité : Services logistiques en RDC
 - Services : ${SERVICES_MECAL.join(', ')}
-- Email : ${profile.email || 'maisonecal@gmail.com'}
-- Zones : ${(profile.cities || ['Kinshasa', 'Goma', 'Bukavu', 'Lubumbashi', 'Kalemie']).join(', ')}
+- Email : ${profile.email || 'maisonecal@gmail.com'}`;
+
+  const prompt = `Rédige une lettre de motivation / manifestation d'intérêt professionnelle en français, adaptée à CETTE offre précise.
+
+${cvBlock}
 
 OFFRE CIBLE :
 - Titre : ${opp.title}
 - Organisation : ${opp.organization || 'Non précisé'}
-- Description : ${(opp.description || '').slice(0, 5000)}
+- Plateforme : ${opp.platform || '—'}
 - Ville : ${opp.ville || opp.location || 'Non précisé'}
 - Deadline : ${opp.deadline || 'Non précisé'}
+- Description : ${(opp.description || '').slice(0, 5000)}
 
-La lettre doit être adressée à l'organisation, montrer pourquoi M-ECAL est qualifié, mentionner la ville, rester sous 400 mots, finir par une invitation à discuter, signature : Direction M-ECAL, ${profile.email || 'maisonecal@gmail.com'}.`;
-  return callClaudeText(prompt, fallback);
+Consignes : 250–400 mots, TEXTE BRUT uniquement (aucun Markdown : pas de **, *, _, #, puces markdown). Mise en forme uniquement par sauts de ligne et paragraphes. Noms d'entreprises en texte normal. Adressée à l'organisation, concrète, sans inventer d'expériences absentes du CV/profil. Signature avec le nom du CV s'il existe, sinon Direction M-ECAL.
+
+OBLIGATOIRE : la lettre DOIT se terminer par cette phrase exacte, après la signature :
+${MAISON_ECAL_LETTER_MENTION}`;
+  try {
+    const raw = await callAIText(
+      prompt,
+      'Tu rédiges des lettres professionnelles M-ECAL en français. Texte brut uniquement, sans Markdown. Termine TOUJOURS par la mention Maison ECAL fournie.',
+      4000
+    );
+    return ensureMaisonEcalMention(stripMarkdown(raw));
+  } catch (e) {
+    logger.warn(`IA lettre/approche indisponible: ${e.message}`);
+    return ensureMaisonEcalMention(stripMarkdown(fallback));
+  }
 }
 
 export async function generateCommercialProposal(opp, profile = {}) {
-  const fallback = `# Proposition commerciale M-ECAL\n\n## Résumé exécutif\nM-ECAL propose une intervention adaptée à ${opp.title}.\n\n## Compréhension du besoin\nL'opportunité concerne ${opp.category} à ${opp.ville || opp.location || 'RDC'}.\n\n## Notre approche\nDiagnostic, planification, exécution terrain, restitution.\n\n## Chronogramme\nSemaine 1: cadrage. Semaines 2-3: exécution. Semaine 4: rapport final.\n\n## Budget indicatif\nÀ préciser après échange technique.\n\n## Contacts\nDirection M-ECAL - ${profile.email || 'maisonecal@gmail.com'}`;
-  const prompt = `Génère une proposition commerciale complète en français pour M-ECAL au format Markdown avec ces sections :
-1. Page de garde M-ECAL
-2. Résumé exécutif
-3. Compréhension du besoin
-4. Notre approche basée sur la catégorie ${opp.category}
-5. Chronogramme
-6. Budget indicatif
-7. Références M-ECAL
-8. Conclusion + contacts
+  const fallback = `# Note d'approche M-ECAL\n\n## Lecture de l'avis\n${opp.title} — ${opp.organization || 'Organisation'} (${opp.ville || opp.location || 'RDC'}).\n\n## Faisabilité\nÀ confirmer après lecture complète du DAO / TDR.\n\n## Recommandation\nPréparer une manifestation d'intérêt ciblée sur les services cœur M-ECAL (formation, inventaire, consultance, études).\n\n## Prochaines étapes\n1. Vérifier la date de clôture sur la source.\n2. Extraire les critères d'éligibilité.\n3. Rédiger AMI + CV/équipe.`;
+  const prompt = `Tu rédiges une NOTE D'APPROCHE COMMERCIALE (pas un devis chiffré, pas une proposition tarifaire).
+
+Objectif : aider M-ECAL à décider comment répondre à cet avis.
+
+Sections Markdown obligatoires :
+1. ## Lecture de l'avis (besoin réel en 5–8 lignes)
+2. ## Faisabilité pour M-ECAL (oui / conditionnel / hors cœur de métier, avec raisons)
+3. ## Angle recommandé (quels services M-ECAL mettre en avant)
+4. ## Risques et points à vérifier (éligibilité, délai, pièces)
+5. ## Plan d'action 7 jours (3 à 6 puces concrètes)
 
 Offre : ${opp.title}
 Organisation : ${opp.organization || 'Non précisé'}
-Description : ${(opp.description || '').slice(0, 5000)}
+Catégorie : ${opp.category}
 Ville : ${opp.ville || opp.location || 'Non précisé'}
-Email contact : ${profile.email || 'maisonecal@gmail.com'}`;
-  return callClaudeText(prompt, fallback);
+Deadline : ${opp.deadline || 'Non précisé'}
+Description : ${(opp.description || '').slice(0, 5000)}
+Profil / CV : ${profile.fullName || profile.companyName || 'M-ECAL'} — ${profile.experience || profile.education || 'services logistiques RDC'}
+
+Utilise **gras** uniquement (jamais *italique* à une étoile). 400–700 mots.`;
+  try {
+    return await callAIText(prompt, 'Tu rédiges une note d\'approche commerciale M-ECAL. Markdown propre, **gras** uniquement.', 4000);
+  } catch (e) {
+    logger.warn(`IA note d'approche indisponible: ${e.message}`);
+    return fallback;
+  }
 }
 
 function cleanEmailText(value = '') {

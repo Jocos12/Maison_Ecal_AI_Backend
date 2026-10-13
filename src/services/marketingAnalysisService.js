@@ -107,23 +107,38 @@ export function buildMarketingStats(applications = []) {
 
 export function buildWeeklyChart(applications = []) {
   const applied = applications.filter((a) => isApplied(a.status));
-  const weeks = [];
+  const dated = applied
+    .map((a) => {
+      const raw = a.appliedDate || a.sentOn || a.createdAt || a.updatedAt;
+      const d = raw ? new Date(raw) : null;
+      return d && !Number.isNaN(d.getTime()) ? { a, d } : null;
+    })
+    .filter(Boolean);
 
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const now = new Date();
+  now.setHours(23, 59, 59, 999);
+  let spanStart = new Date(now.getTime() - 5 * WEEK_MS);
+  spanStart.setHours(0, 0, 0, 0);
+  if (dated.length) {
+    const oldest = new Date(Math.min(...dated.map((x) => x.d.getTime())));
+    oldest.setHours(0, 0, 0, 0);
+    if (oldest < spanStart) spanStart = oldest;
+  }
+  const spanMs = Math.max(WEEK_MS, now.getTime() - spanStart.getTime());
+  const bucketMs = Math.max(WEEK_MS, Math.ceil(spanMs / 6));
+
+  const weeks = [];
   for (let i = 5; i >= 0; i -= 1) {
-    const end = new Date();
+    const end = new Date(now.getTime() - i * bucketMs);
     end.setHours(23, 59, 59, 999);
-    end.setDate(end.getDate() - i * 7);
-    const start = new Date(end);
-    start.setDate(start.getDate() - 6);
+    const start = new Date(end.getTime() - bucketMs + 1);
     start.setHours(0, 0, 0, 0);
     weeks.push({ start, end, week: `S${6 - i}` });
   }
 
   return weeks.map(({ start, end, week }) => {
-    const inRange = applied.filter((a) => {
-      const d = new Date(a.appliedDate || a.createdAt);
-      return d >= start && d <= end;
-    });
+    const inRange = dated.filter((x) => x.d >= start && x.d <= end).map((x) => x.a);
     return {
       week,
       soumises: inRange.length,
@@ -218,7 +233,27 @@ export async function generateMarketingContent({ prompt, templateKey, stats = {}
     prompt ||
     `Génère un email marketing complet « ${label} » pour M-ECAL (services logistiques RDC).
 Contexte candidatures: ${JSON.stringify(stats)}
-Inclus: objet, corps structuré, signature M-ECAL. Ton professionnel B2B.`;
+
+Rédige en Markdown, avec des titres ## et des séparateurs --- entre les blocs :
+## Objet
+(une ligne)
+
+---
+
+## Informations pratiques
+(contexte, délai, objectif du mail)
+
+---
+
+## Message
+(corps de l'email, gras **...** pour les éléments clés)
+
+---
+
+## Signature
+Maison ECAL — Études, Conseil & Assistance logistique (RDC)
+
+Ton professionnel B2B. Pas de backticks.`;
 
   const text = await callAIText(userPrompt, MARKETING_SYSTEM, 1800);
   return { title: label, content: text };

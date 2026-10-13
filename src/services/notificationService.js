@@ -21,10 +21,10 @@ export async function sendWhatsAppNewOpportunity(opportunity) {
   const link = `${base}/opportunities?id=${opportunity._id}`;
   const body = `🔔 *Nouvelle offre M-ECAL*
 📋 ${opportunity.title}
-🏢 ${opportunity.organization || '—'}
+🏢 ${opportunity.organization || 'n/d'}
 📂 Catégorie: ${opportunity.category}
-🌍 ${opportunity.location || '—'}
-⏰ Clôture: ${opportunity.deadline ? new Date(opportunity.deadline).toISOString().slice(0, 10) : '—'}
+🌍 ${opportunity.location || 'n/d'}
+⏰ Clôture: ${opportunity.deadline ? new Date(opportunity.deadline).toISOString().slice(0, 10) : 'n/d'}
 🔗 Voir: ${link}`;
 
   await client.messages.create({ from, to, body });
@@ -55,16 +55,16 @@ export async function sendDailyDigestEmail(opportunities, toOverride) {
     return { sent: false };
   }
   const lines = opportunities.map(
-    (o) => `- ${o.title} (${o.platform}) — ${o.sourceUrl}`
+    (o) => `- ${o.title} (${o.platform}), ${o.sourceUrl}`
   );
-  const html = `<h2>M-ECAL — opportunités (24h)</h2><ul>${opportunities
-    .map((o) => `<li><a href="${o.sourceUrl}">${o.title}</a> — ${o.organization || ''}</li>`)
+  const html = `<h2>M-ECAL, opportunités (24h)</h2><ul>${opportunities
+    .map((o) => `<li><a href="${o.sourceUrl}">${o.title}</a>, ${o.organization || ''}</li>`)
     .join('')}</ul>`;
 
   await mailer.sendMail({
     from: process.env.EMAIL_USER,
     to,
-    subject: `M-ECAL digest — ${opportunities.length} opportunité(s)`,
+    subject: `M-ECAL digest, ${opportunities.length} opportunité(s)`,
     text: lines.join('\n'),
     html
   });
@@ -78,7 +78,7 @@ export async function sendTestNotification({ email, whatsappTo }) {
     await mailer.sendMail({
       from: process.env.EMAIL_USER,
       to: email || process.env.EMAIL_TO,
-      subject: 'M-ECAL — test notification',
+      subject: 'M-ECAL, test notification',
       text: 'Ceci est un message de test depuis le moniteur M-ECAL.'
     });
     results.push('email');
@@ -88,7 +88,7 @@ export async function sendTestNotification({ email, whatsappTo }) {
     await client.messages.create({
       from: process.env.TWILIO_WHATSAPP_FROM,
       to: whatsappTo || process.env.ALERT_WHATSAPP_TO,
-      body: 'Test M-ECAL Monitor — notifications OK.'
+      body: 'Test M-ECAL Monitor, notifications OK.'
     });
     results.push('whatsapp');
   }

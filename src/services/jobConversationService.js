@@ -46,14 +46,18 @@ export async function createConversation(userId) {
 export async function listConversations(userId) {
   const rows = await JobAssistantConversation.find({ userId })
     .sort({ updatedAt: -1 })
-    .select('title updatedAt createdAt')
+    .select({ title: 1, updatedAt: 1, createdAt: 1, messages: { $slice: 16 } })
     .lean();
-  return rows.map((r) => ({
-    id: r._id,
-    title: r.title,
-    updatedAt: r.updatedAt,
-    createdAt: r.createdAt
-  }));
+  return rows.map((r) => {
+    const firstUser = (r.messages || []).find((m) => m.role === 'user');
+    return {
+      id: r._id,
+      title: r.title,
+      updatedAt: r.updatedAt,
+      createdAt: r.createdAt,
+      preview: (firstUser?.content || '').replace(/\s+/g, ' ').trim().slice(0, 90)
+    };
+  });
 }
 
 export async function getConversation(userId, conversationId) {
@@ -111,7 +115,8 @@ export async function appendAndProcessMessage(userId, conversationId, userMessag
     userMessage,
     sources: options.sources || null,
     locale: options.locale || null,
-    systemPrompt: options.systemPrompt || null
+    systemPrompt: options.systemPrompt || null,
+    userId
   });
 
   conv.messages.push({
@@ -123,8 +128,13 @@ export async function appendAndProcessMessage(userId, conversationId, userMessag
     noResults: result.noResults || false,
     suggestions: result.suggestions || null,
     manualLinks: result.manualLinks || null,
-    diagnosis: result.diagnosis || null
+    diagnosis: result.diagnosis || null,
+    provider: result.provider || null
   });
+
+  if (result.document) {
+    conv.pendingDocument = result.document;
+  }
 
   if (result.jobs?.length) {
     conv.selectedOffer = result.jobs[0];

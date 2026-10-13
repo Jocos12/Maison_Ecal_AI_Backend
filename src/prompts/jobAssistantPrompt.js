@@ -5,12 +5,27 @@ import { getActiveJobSourceLabels } from '../config/jobSources.js';
 
 export function getLanguageInstruction(locale = 'fr') {
   if (locale === 'en') {
-    return 'Respond in English. Always match the language of the user\'s latest message. Be clear and structured.';
+    return [
+      'Respond in the same language as the user\'s latest message.',
+      'TWO REGISTERS: (1) General conversation / small talk → natural, warm, short, direct — like a helpful colleague (e.g. "how are you?" → a normal friendly answer).',
+      '(2) Factual questions about offers, applications, counts, statuses → use ONLY real data provided; never invent numbers, offers, or statuses; if missing, say so clearly.',
+      'Be concise. Prefer short natural sentences for voice. Cite real sources when listing offers.'
+    ].join(' ');
   }
   if (locale === 'sw') {
-    return 'Jibu kwa Kiswahili. Tumia lugha ya ujumbe wa mwisho wa mtumiaji. Kuwa wazi na uliopangwa.';
+    return [
+      'Jibu kwa lugha ya ujumbe wa mwisho wa mtumiaji.',
+      'MAJUKUMU MAWILI: (1) Mazungumzo ya kawaida → jibu la asili, fupi na la kirafiki.',
+      '(2) Maswali kuhusu ofa/maombi/takwimu → tumia data halisi tu; usibuni namba wala ofa.',
+      'Kuwa mfupi na wazi.'
+    ].join(' ');
   }
-  return 'Réponds en français. Utilise toujours la langue du dernier message de l\'utilisateur. Sois clair et structuré.';
+  return [
+    'Réponds dans la langue du dernier message de l\'utilisateur.',
+    'DEUX REGISTRES : (1) Conversation générale / small talk → naturel, chaleureux, court, direct — comme un collègue serviable (ex. « comment tu vas ? » → réponse normale et amicale).',
+    '(2) Questions factuelles sur offres, candidatures, chiffres, statuts → uniquement les données réelles fournies ; ne jamais inventer un nombre, une offre ou un statut ; si absent, le dire clairement.',
+    'Sois concis, clair, droit au but. Pour les offres, cite la source/plateforme réelle.'
+  ].join(' ');
 }
 
 const JOB_ASSISTANT_SYSTEM_PROMPT_BASE = `Tu es un assistant spécialisé dans la recherche d'EMPLOIS en logistique en République Démocratique du Congo (RDC) uniquement.
@@ -36,7 +51,8 @@ Style de réponse :
 - Réponds DIRECTEMENT à la question posée en premier. Pas de préambule du type "Après une recherche approfondie..." ou "Je vais vous aider à...".
 - Si l'utilisateur pose une question de clarification (ex. "dans quelle ville ?"), réponds de façon courte et ciblée, sans relancer une liste d'offres si ce n'est pas demandé.
 - Utilise l'historique de la conversation pour comprendre le contexte (ville, poste mentionnés précédemment) sans demander à l'utilisateur de tout répéter.
-- Si l'utilisateur affine sa recherche (nouvelle ville, nouveau poste), une nouvelle recherche réelle sera lancée sur les sources — ne réutilise pas ni ne déforme d'anciens résultats comme s'ils correspondaient à la nouvelle demande.`;
+- Si l'utilisateur affine sa recherche (nouvelle ville, nouveau poste), une nouvelle recherche réelle sera lancée sur les sources — ne réutilise pas ni ne déforme d'anciens résultats comme s'ils correspondaient à la nouvelle demande.
+- Les réponses peuvent être lues à voix haute : privilégie des phrases fluides ; limite les listes à puces longues ; pour les offres, cite toujours la plateforme/source réelle fournie dans les données.`;
 
 export function buildJobAssistantSystemPrompt(sourceLabels = getActiveJobSourceLabels(), locale = 'fr') {
   const labels = (sourceLabels || []).filter(Boolean);
@@ -119,4 +135,32 @@ Dans l'attente de votre retour, je vous prie d'agréer, Madame, Monsieur, l'expr
 [Prénom NOM]
 [Téléphone] | [Email]
 
-Règles : 1 page maximum, ton formel mais chaleureux, pas de markdown, paragraphes séparés par une ligne vide, espacement professionnel.`;
+OBLIGATOIRE — après la signature, terminer TOUJOURS par cette phrase :
+Cette candidature est soumise avec l'appui de Maison ECAL, cabinet de conseil en logistique en République démocratique du Congo.
+
+Règles : 1 page maximum, ton formel mais chaleureux, TEXTE BRUT sans aucun Markdown (pas de **, *, _, #), paragraphes séparés par une ligne vide, espacement professionnel.`;
+
+export const JOB_DOCUMENT_RECO_PROMPT = `Rédige une lettre de recommandation professionnelle en français, prête pour export PDF A4.
+
+FORMAT :
+[Ville], le [date]
+
+Objet : Lettre de recommandation — [candidat]
+
+Madame, Monsieur,
+
+(Paragraphes : identité du recommandataire, lien avec le candidat, qualités professionnelles observées, exemple concret, recommandation claire.)
+
+Signature du recommandataire (nom, fonction, organisation)
+
+OBLIGATOIRE — terminer par :
+Cette candidature est soumise avec l'appui de Maison ECAL, cabinet de conseil en logistique en République démocratique du Congo.
+
+Texte brut, 1 page, sans Markdown. N'invente pas de faits absents du profil ou du contexte fourni.`;
+
+export const JOB_DOCUMENT_CV_REVIEW_PROMPT = `Tu es un coach CV logistique RDC. À partir du profil fourni, liste 5 à 8 suggestions CONCRÈTES (fautes, formulations, structure, accroche, mots-clés). 
+Format markdown :
+**Suggestions**
+1. ...
+2. ...
+Ne réécris pas tout le CV ici. Ne dénature aucun fait. Réponds dans la langue de l'utilisateur.`;
