@@ -33,6 +33,26 @@ export async function getSyncState() {
   return { ...(doc?.value || {}), running: isNrcSyncRunning() };
 }
 
+/** NRC page stays NRC-only. Notices saved before `organization` existed count as NRC. */
+export function organizationClause(org = 'nrc') {
+  if (!org || org === 'nrc') {
+    return { $or: [{ organization: 'nrc' }, { organization: { $exists: false } }, { organization: '' }] };
+  }
+  if (org === 'all') return null;
+  return { organization: String(org).toLowerCase() };
+}
+
+export function applyOrganization(filter, org = 'nrc') {
+  const clause = organizationClause(org);
+  if (!clause) return filter;
+  if (clause.$or && filter.$or) {
+    filter.$and = [...(filter.$and || []), { $or: clause.$or }, { $or: filter.$or }];
+    delete filter.$or;
+    return filter;
+  }
+  return Object.assign(filter, clause);
+}
+
 // ------------------------------------------------------------------ scoring
 
 const labelOf = (score) => (score >= HIGH_SCORE ? 'high' : score >= MEDIUM_SCORE ? 'medium' : 'low');

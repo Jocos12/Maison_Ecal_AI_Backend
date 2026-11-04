@@ -9,6 +9,8 @@ import { getGmailStatus, sendMessage } from './gmailService.js';
 import SystemSetting from '../models/SystemSetting.js';
 import { letterToHtml } from '../utils/letterToHtml.js';
 import { stripMarkdown } from '../utils/stripMarkdown.js';
+import { rememberStatus } from './statusHistory.js';
+import { recordAudit } from './auditService.js';
 
 function mimeForName(name = '') {
   const lower = name.toLowerCase();
@@ -101,7 +103,8 @@ export async function sendApplicationEmail({
   confirmed,
   to,
   subject,
-  body
+  body,
+  actor = null
 }) {
   if (confirmed !== true) {
     const err = new Error('Confirmation explicite requise. Aucun e-mail n’a été envoyé.');
@@ -171,7 +174,9 @@ export async function sendApplicationEmail({
     });
   }
 
+  const previousStatus = app.status;
   app.status = 'submitted';
+  rememberStatus(app, 'submitted');
   app.appliedDate = new Date();
   app.letterText = letter;
   app.contactPerson = { ...(app.contactPerson?.toObject?.() || app.contactPerson || {}), email: recipient };
@@ -185,5 +190,17 @@ export async function sendApplicationEmail({
   };
   await app.save();
   const populated = await app.populate('opportunity');
+  const user = await User.findById(userId).select('name email').lean();
+  await recordAudit({
+    action: 'application_sent',
+    entityType: 'application',
+    entityId: populated._id,
+    entityLabel: populated.opportunity?.title || populated.externalOffer?.title || 'Candidature',
+    actorType: actor?.actorType || 'human',
+    channel: actor?.channel || 'ui',
+    actorUserId: userId,
+    actorName: actor?.actorName || user?.name || user?.email || '',
+    changes: previousStatus === 'submitted' ? [] : [{ field: 'status', from: previousStatus, to: 'submitted' }]
+  });
   return { application: populated, gmailMessageId: gmailResult?.id || null };
 }

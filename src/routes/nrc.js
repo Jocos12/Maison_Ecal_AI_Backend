@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import rateLimit from 'express-rate-limit';
 import NrcNotice from '../models/NrcNotice.js';
 import logger from '../utils/logger.js';
-import { getSyncState, isNrcSyncRunning, syncNrc } from '../services/nrcService.js';
+import { getSyncState, isNrcSyncRunning, syncNrc, applyOrganization } from '../services/nrcService.js';
 import { generateBrief, generateDraft } from '../services/nrcAiService.js';
 import { countryNameFrom } from '../services/nrcCountries.js';
 
@@ -27,6 +27,7 @@ const aiLimiter = rateLimit({
 
 const LIST_FIELDS = [
   'kind',
+  'organization',
   'title',
   'url',
   'applyUrl',
@@ -74,6 +75,7 @@ router.get('/', async (req, res, next) => {
       const re = new RegExp(escapeRe(search), 'i');
       filter.$or = [{ title: re }, { reference: re }, { country: re }, { location: re }];
     }
+    applyOrganization(filter, 'nrc');
 
     const order =
       sort === 'deadline' ? { sortDeadline: 1, score: -1 } : sort === 'recent' ? { postedDate: -1, firstSeenAt: -1 } : { score: -1, sortDeadline: 1 };
@@ -91,7 +93,7 @@ router.get('/', async (req, res, next) => {
 
 router.get('/meta', async (_req, res, next) => {
   try {
-    const open = { isArchived: false, isLogistics: true };
+    const open = applyOrganization({ isArchived: false, isLogistics: true }, 'nrc');
     const soon = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const [tenders, jobs, fitTenders, fitJobs, drc, closingSoon, closed, hidden, countries, sync] = await Promise.all([
       NrcNotice.countDocuments({ ...open, kind: 'tender' }),
@@ -100,9 +102,8 @@ router.get('/meta', async (_req, res, next) => {
       NrcNotice.countDocuments({ ...open, kind: 'job', fitsMecal: true }),
       NrcNotice.countDocuments({ ...open, isDrc: true }),
       NrcNotice.countDocuments({ ...open, deadline: { $gte: new Date(), $lte: soon } }),
-      NrcNotice.countDocuments({ isArchived: true, isLogistics: true }),
-      // open notices that are not about logistics, so left out of the list
-      NrcNotice.countDocuments({ isArchived: false, isLogistics: false, classifiedAt: { $ne: null } }),
+      NrcNotice.countDocuments(applyOrganization({ isArchived: true, isLogistics: true }, 'nrc')),
+      NrcNotice.countDocuments(applyOrganization({ isArchived: false, isLogistics: false, classifiedAt: { $ne: null } }, 'nrc')),
       NrcNotice.aggregate([
         { $match: { ...open, countryCode: { $ne: '' } } },
         { $group: { _id: '$countryCode', count: { $sum: 1 }, tenders: { $sum: { $cond: [{ $eq: ['$kind', 'tender'] }, 1, 0] } } } },

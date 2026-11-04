@@ -82,6 +82,36 @@ export const DEFAULT_SOURCES = [
 /** Sources complémentaires — ajoutées sans modifier DEFAULT_SOURCES existant */
 export const ADDITIONAL_VEILLE_SOURCES = [
   {
+    key: 'IRC',
+    name: 'IRC, emplois logistiques',
+    url: 'https://theirc.wd1.myworkdayjobs.com/en-US/External_Careers',
+    scraperKey: 'IRC',
+    description:
+      'International Rescue Committee, portail Workday. Seuls les postes logistique, supply chain, procurement, entrepôt et transport sont enregistrés.',
+    frequencyHours: 1,
+    enabled: true
+  },
+  {
+    key: 'DrcNgo',
+    name: 'DRC, emplois logistiques',
+    url: 'https://drc.ngo/jobs/',
+    scraperKey: 'DrcNgo',
+    description:
+      'Danish Refugee Council. Seuls les postes supply chain et logistique dont le lieu de travail est en Afrique apparaissent dans la veille élargie.',
+    frequencyHours: 1,
+    enabled: true
+  },
+  {
+    key: 'ICRC',
+    name: 'ICRC, emplois logistiques',
+    url: 'https://careers.icrc.org/search/',
+    scraperKey: 'ICRC',
+    description:
+      'Comité international de la Croix-Rouge, portail SuccessFactors. Seuls les postes logistiques dont le lieu de travail est en Afrique apparaissent dans la veille élargie.',
+    frequencyHours: 1,
+    enabled: true
+  },
+  {
     key: 'DevExVeille',
     name: 'DevEx, Veille RDC logistique',
     url: 'https://www.devex.com',

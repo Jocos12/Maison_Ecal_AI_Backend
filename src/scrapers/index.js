@@ -15,6 +15,9 @@ import { scrapeAfdb } from './afdb.js';
 import { scrapeAfdbVeille } from './veille/afdbVeille.js';
 import { scrapeSigmap } from './sigmap.js';
 import { scrapeArsp } from './arsp.js';
+import { scrapeIrc } from '../services/ircNoticeService.js';
+import { scrapeDrcNgo } from '../services/drcNgoNoticeService.js';
+import { scrapeIcrc } from '../services/icrcNoticeService.js';
 import logger from '../utils/logger.js';
 import Source from '../models/Source.js';
 import ScrapeLog from '../models/ScrapeLog.js';
@@ -242,7 +245,10 @@ const SCRAPERS = {
   AfDB: scrapeAfdb,
   DevExVeille: scrapeDevexVeille,
   UNGMVeille: scrapeUngmLogisticsVeille,
-  AfDBVeille: scrapeAfdbVeille
+  AfDBVeille: scrapeAfdbVeille,
+  IRC: scrapeIrc,
+  DrcNgo: scrapeDrcNgo,
+  ICRC: scrapeIcrc
 };
 
 let scrapeInFlight = null;
@@ -322,8 +328,8 @@ export function isScrapeInFlight() {
 }
 
 /** Scrapers that answer in seconds. SIGMAP takes 30 s and ProfilRDC and AchatPublicRDC (OCR of PDFs) take minutes and are left to the scheduled full scan. */
-export const QUICK_SCRAPER_KEYS = ['ReliefWeb', 'UNGM', 'ARSP', 'AfDB', 'UNGMVeille', 'AfDBVeille'];
-const QUICK_PARALLEL_KEYS = ['ReliefWeb', 'UNGM', 'ARSP', 'AfDB'];
+export const QUICK_SCRAPER_KEYS = ['ReliefWeb', 'UNGM', 'ARSP', 'AfDB', 'UNGMVeille', 'AfDBVeille', 'IRC', 'DrcNgo', 'ICRC'];
+const QUICK_PARALLEL_KEYS = ['ReliefWeb', 'UNGM', 'ARSP', 'AfDB', 'IRC', 'DrcNgo', 'ICRC'];
 
 export async function runAllScrapers({ triggeredBy = 'manual', onlyKeys = null, parallel = false } = {}) {
   if (scrapeInFlight) {

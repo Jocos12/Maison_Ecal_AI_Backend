@@ -3,6 +3,7 @@ import Application from '../models/Application.js';
 import JobApplicationLog from '../models/JobApplicationLog.js';
 import { activeOpportunityFilter } from './opportunityLifecycle.js';
 import { extractSearchParams, RDC_CITIES } from './jobContextService.js';
+import { listMatchingOpportunities } from './voiceToolRuntime.js';
 
 const SOURCE_ALIASES = [
   { label: 'ReliefWeb', keys: ['reliefweb', 'relief web'], platforms: ['ReliefWeb'] },
@@ -75,27 +76,81 @@ function intro(locale, understood) {
 
 function navFallback(locale) {
   if (locale === 'en') {
-    return [
-      intro(locale),
-      '',
-      'I cannot analyse this request without AI. Meanwhile you can:',
-      '- Open **[Opportunities](/opportunities)** to browse active listings',
-      '- Open **[Applications](/applications)** to check follow-up',
-      '- Open **[Job assistant](/assistant-emploi)** for CV / letters once AI is back',
-      '',
-      'I will use the full AI cascade again as soon as a provider responds.'
-    ].join('\n');
+    return "I can't answer that precisely right now. Active listings are on the Opportunities page.";
   }
-  return [
-    intro(locale),
-    '',
-    'Je ne peux pas analyser cette demande en ce moment, mais vous pouvez consulter directement :',
-    '- la page **[Opportunités](/opportunities)**',
-    '- la page **[Candidatures](/applications)**',
-    '- l’**[Assistant Emploi](/assistant-emploi)** pour CV et lettres dès que l’IA revient',
-    '',
-    'La cascade IA sera réessayée automatiquement dès qu’un fournisseur répondra.'
-  ].join('\n');
+  return 'Je ne peux pas répondre précisément à cette demande pour le moment. Les offres déjà collectées sont sur la page Opportunités.';
+}
+
+/**
+ * Direct answers for questions the agent must not turn into a capability menu.
+ * Returns null when the question should go to the model.
+ */
+export async function tryDirectAnswer({ lastUser = '', locale = 'fr' } = {}) {
+  const t = lower(lastUser).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const en = locale === 'en';
+
+  if (/\b(comment (tu|ca) vas?\b|how are you|ca va\b)/.test(t)) {
+    return {
+      reply: en ? "I'm doing well, thanks. And you?" : 'Ça va bien, merci. Et toi ?',
+      provider: 'local'
+    };
+  }
+
+  if (/\b(telephone|phone|call me|m'appeler|m appeler)\b/.test(t) && !/\b(offre|candidature|postul)\b/.test(t)) {
+    return {
+      reply: en ? "I can't call you on the phone." : 'Je ne peux pas vous appeler au téléphone.',
+      provider: 'local'
+    };
+  }
+
+  if (
+    /\b(offre|offres|opportunit)\b/.test(t) &&
+    /(cadr|correspond|m-?ecal|maison\s*ecal)/.test(t) &&
+    !/\bpostul/.test(t)
+  ) {
+    const result = await listMatchingOpportunities({ mecalFit: true, limit: 8 });
+    if (!result.items.length) {
+      const alt = result.review
+        ? en
+          ? ` ${result.review} still need a review.`
+          : ` ${result.review} sont encore à vérifier.`
+        : '';
+      return {
+        reply:
+          (en
+            ? 'No active offer currently fits M-ECAL.'
+            : 'Aucune offre active ne cadre avec M-ECAL pour le moment.') + alt,
+        provider: 'local'
+      };
+    }
+    const lines = result.items.map(
+      (o, i) => `${i + 1}. **${o.title}** — ${o.organization || '—'}${o.ville ? ` (${o.ville})` : ''}`
+    );
+    return {
+      reply:
+        (en
+          ? `**${result.total}** active offer${result.total > 1 ? 's' : ''} fit M-ECAL:\n\n`
+          : `**${result.total}** offre${result.total > 1 ? 's' : ''} active${result.total > 1 ? 's' : ''} ${result.total > 1 ? 'cadrent' : 'cadre'} avec M-ECAL :\n\n`) + lines.join('\n'),
+      provider: 'local'
+    };
+  }
+
+  if (/\b(combien|nombre|how many)\b/.test(t) && /\bcandidature|application/.test(t)) {
+    const pending = /attente|pending/.test(t);
+    const n = await Application.countDocuments(pending ? { status: { $in: ['pending', 'interview'] } } : {});
+    return {
+      reply: pending
+        ? en
+          ? `**${n}** application(s) are pending.`
+          : `**${n}** candidature(s) sont en attente.`
+        : en
+          ? `**${n}** application(s) in total.`
+          : `**${n}** candidature(s) au total.`,
+      provider: 'local'
+    };
+  }
+
+  return null;
 }
 
 function filterConversationJobs(jobs = [], { city, source }) {

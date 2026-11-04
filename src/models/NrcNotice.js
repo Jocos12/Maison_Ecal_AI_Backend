@@ -8,6 +8,8 @@ import mongoose from 'mongoose';
 const NrcNoticeSchema = new mongoose.Schema(
   {
     kind: { type: String, enum: ['tender', 'job'], required: true, index: true },
+    // nrc for the existing feed. Other humanitarian orgs (irc, …) share this collection.
+    organization: { type: String, default: 'nrc', index: true },
     // "tender:<slug>" or "job:<requisition id>": stable across runs
     externalId: { type: String, required: true, unique: true },
     title: { type: String, required: true },
@@ -21,6 +23,8 @@ const NrcNoticeSchema = new mongoose.Schema(
     countryCode: { type: String, default: '', index: true },
     location: { type: String, default: '' },
     isDrc: { type: Boolean, default: false, index: true },
+    // Veille élargie: africa is shown, outside is kept but hidden, unverified waits for a manual check.
+    locationScope: { type: String, enum: ['', 'africa', 'outside', 'unverified'], default: '', index: true },
 
     postedDate: { type: Date },
     deadline: { type: Date },

@@ -2,18 +2,77 @@ import { Router } from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { fileURLToPath } from 'url';
 import Application from '../models/Application.js';
+import NrcNotice from '../models/NrcNotice.js';
 import User from '../models/User.js';
 import { sendApplicationEmail, previewApplicationEmail } from '../services/applicationEmailService.js';
+import { rememberStatus } from '../services/statusHistory.js';
+import { actorFromRequest, changedFields, recordAudit } from '../services/auditService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOAD_DIR = path.join(__dirname, '../../uploads/application-docs');
 
 const router = Router();
 
+const ORG_NAME = { nrc: 'NRC', irc: 'IRC', drcngo: 'DRC', icrc: 'ICRC' };
+
+function presentApplication(app) {
+  if (!app) return app;
+  const row = typeof app.toObject === 'function' ? app.toObject() : { ...app };
+  if (row.opportunity || !row.externalOffer?.title) return row;
+  const o = row.externalOffer;
+  const org = String(o.organization || 'nrc').toLowerCase();
+  row.opportunity = {
+    title: o.title,
+    organization: ORG_NAME[org] || org.toUpperCase(),
+    sourceUrl: o.url,
+    ville: o.ville || '',
+    country: o.country || '',
+    deadline: o.deadline || null,
+    description: o.description || '',
+    reference: o.reference || '',
+    platform: ORG_NAME[org] || org.toUpperCase(),
+    externalNotice: true
+  };
+  return row;
+}
+
+function snapshotNotice(notice) {
+  const org = String(notice.organization || 'nrc').toLowerCase();
+  return {
+    title: notice.title,
+    organization: org,
+    url: notice.applyUrl || notice.url || '',
+    ville: notice.location || notice.country || '',
+    country: notice.country || '',
+    deadline: notice.deadline || undefined,
+    description: String(notice.description || '').slice(0, 4000),
+    reference: notice.reference || ''
+  };
+}
+
 async function ensureUploadDir() {
   await fs.mkdir(UPLOAD_DIR, { recursive: true });
+}
+
+const APPLICATION_FIELDS = ['status', 'notes', 'rejectionReason', 'sendMethod', 'handledBy'];
+
+function applicationLabel(doc) {
+  return doc?.opportunity?.title || doc?.externalOffer?.title || 'Candidature';
+}
+
+function auditApplication(actor, action, doc, changes = []) {
+  const finalAction = action === 'update' && changes.some((change) => change.field === 'status') ? 'status_change' : action;
+  return recordAudit({
+    action: finalAction,
+    entityType: 'application',
+    entityId: doc?._id,
+    entityLabel: applicationLabel(doc),
+    ...actor,
+    changes
+  });
 }
 
 function safeBaseName(name = 'document.pdf') {
@@ -26,7 +85,7 @@ router.get('/', async (req, res, next) => {
       .populate('opportunity')
       .sort({ updatedAt: -1 })
       .lean();
-    res.json(list);
+    res.json(list.map(presentApplication));
   } catch (e) {
     next(e);
   }
@@ -34,7 +93,27 @@ router.get('/', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
+    const actor = actorFromRequest(req);
     const body = { ...req.body };
+    delete body.auditOrigin;
+    if (body.notice && !body.opportunity) {
+      if (!mongoose.Types.ObjectId.isValid(body.notice)) {
+        return res.status(400).json({ message: 'Avis introuvable.' });
+      }
+      const notice = await NrcNotice.findById(body.notice).select('title organization url applyUrl location country deadline description reference isLogistics').lean();
+      if (!notice) return res.status(404).json({ message: 'Avis introuvable.' });
+      const existing = await Application.findOne({ notice: notice._id }).lean();
+      if (existing) return res.status(200).json({ ...presentApplication(existing), alreadyExisted: true });
+      const doc = await Application.create({
+        notice: notice._id,
+        status: 'draft',
+        externalOffer: snapshotNotice(notice)
+      });
+      rememberStatus(doc, doc.status || 'draft');
+      await doc.save();
+      await auditApplication(actor, 'create', doc);
+      return res.status(201).json(presentApplication(doc));
+    }
     if (!body.opportunity) {
       return res.status(400).json({ message: 'Offre requise.' });
     }
@@ -48,8 +127,13 @@ router.post('/', async (req, res, next) => {
       return res.status(200).json({ ...existing, alreadyExisted: true });
     }
     body.status = body.status || 'draft';
+    delete body.statusEvents;
+    delete body.archivedAt;
     const doc = await Application.create(body);
+    rememberStatus(doc, doc.status);
+    await doc.save();
     const populated = await doc.populate('opportunity');
+    await auditApplication(actor, doc.status === 'submitted' ? 'application_sent' : 'create', populated);
     res.status(201).json(populated);
   } catch (e) {
     next(e);
@@ -84,7 +168,8 @@ router.post('/send-email', async (req, res, next) => {
       confirmed,
       to,
       subject,
-      body
+      body,
+      actor: actorFromRequest(req)
     });
     res.json({ success: true, ...result });
   } catch (e) {
@@ -94,7 +179,9 @@ router.post('/send-email', async (req, res, next) => {
 
 router.patch('/:id', async (req, res, next) => {
   try {
+    const actor = actorFromRequest(req);
     const body = { ...req.body };
+    delete body.auditOrigin;
     if (body.sendMethod === '' || body.sendMethod == null) {
       delete body.sendMethod;
     }
@@ -119,12 +206,25 @@ router.patch('/:id', async (req, res, next) => {
         }))
         .filter((d) => d.url || d.documentId || d.storageKey);
     }
+    delete body.statusEvents;
+    delete body.archivedAt;
+    const before = await Application.findById(req.params.id).populate('opportunity');
+    if (body.status) {
+      const current = await Application.findById(req.params.id);
+      if (!current) return res.status(404).json({ message: 'Not found' });
+      if (body.status !== current.status) {
+        rememberStatus(current, body.status);
+        body.statusEvents = current.statusEvents;
+      }
+    }
     const doc = await Application.findByIdAndUpdate(req.params.id, body, {
       new: true,
       runValidators: true
     }).populate('opportunity');
     if (!doc) return res.status(404).json({ message: 'Not found' });
-    res.json(doc);
+    const changes = before ? changedFields(before.toObject(), doc.toObject(), APPLICATION_FIELDS) : [];
+    if (changes.length) await auditApplication(actor, 'update', doc, changes);
+    res.json(presentApplication(doc));
   } catch (e) {
     next(e);
   }
@@ -153,7 +253,7 @@ router.post('/:id/documents/upload', async (req, res, next) => {
     });
     await app.save();
     const populated = await app.populate('opportunity');
-    res.json({ document: app.documents[app.documents.length - 1], application: populated });
+    res.json({ document: app.documents[app.documents.length - 1], application: presentApplication(populated) });
   } catch (e) {
     next(e);
   }
@@ -174,7 +274,7 @@ router.post('/:id/attach-cv', async (req, res, next) => {
     );
     if (already) {
       const populated = await app.populate('opportunity');
-      return res.json({ alreadyAttached: true, application: populated });
+      return res.json({ alreadyAttached: true, application: presentApplication(populated) });
     }
     const buf = await fs.readFile(filePath);
     await ensureUploadDir();
@@ -187,7 +287,7 @@ router.post('/:id/attach-cv', async (req, res, next) => {
     });
     await app.save();
     const populated = await app.populate('opportunity');
-    res.json({ alreadyAttached: false, application: populated });
+    res.json({ alreadyAttached: false, application: presentApplication(populated) });
   } catch (e) {
     next(e);
   }
@@ -221,7 +321,11 @@ router.get('/documents/file/:key', async (req, res, next) => {
 
 router.delete('/:id', async (req, res, next) => {
   try {
-    await Application.findByIdAndDelete(req.params.id);
+    const doc = await Application.findById(req.params.id).populate('opportunity');
+    if (doc) {
+      await doc.deleteOne();
+      await auditApplication(actorFromRequest(req), 'delete', doc);
+    }
     res.status(204).send();
   } catch (e) {
     next(e);

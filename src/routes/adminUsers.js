@@ -4,6 +4,7 @@ import User from '../models/User.js';
 import { authMiddleware, attachUser } from '../middleware/auth.js';
 import { sendAccountApprovedEmail } from '../services/email.service.js';
 import { getRecentActivity, recordAdminActivity } from '../services/loginActivityService.js';
+import { actorFromRequest, changedFields, recordAudit } from '../services/auditService.js';
 import logger from '../utils/logger.js';
 
 const router = Router();
@@ -165,6 +166,14 @@ router.post('/users', async (req, res, next) => {
       targetUser: user,
       details: `Création du compte ${user.email}`
     });
+    await recordAudit({
+      action: 'create',
+      entityType: 'user',
+      entityId: user._id,
+      entityLabel: user.name || user.email,
+      ...actorFromRequest(req),
+      changes: [{ field: 'role', from: null, to: user.role }]
+    });
 
     res.status(201).json({ user: serializeUser(user), message: 'Utilisateur créé.' });
   } catch (e) {
@@ -177,6 +186,13 @@ router.put('/users/:id', async (req, res, next) => {
     if (isSelf(req)) return res.status(400).json({ message: SELF_MESSAGE });
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable.' });
+    const previous = {
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      isApproved: user.isApproved,
+      isVerified: user.isVerified
+    };
 
     const { name, email, role, isApproved, isVerified, password } = req.body || {};
     if (name !== undefined) {
@@ -224,6 +240,16 @@ router.put('/users/:id', async (req, res, next) => {
       targetUser: user,
       details: `Mise à jour du compte ${user.email}`
     });
+    const userChanges = changedFields(previous, user.toObject(), ['name', 'email', 'role', 'isApproved', 'isVerified']);
+    if (password) userChanges.push({ field: 'password', from: null, to: 'changed' });
+    await recordAudit({
+      action: 'update',
+      entityType: 'user',
+      entityId: user._id,
+      entityLabel: user.name || user.email,
+      ...actorFromRequest(req),
+      changes: userChanges
+    });
 
     res.json({ user: serializeUser(user), message: 'Utilisateur mis à jour.' });
   } catch (e) {
@@ -254,6 +280,13 @@ router.delete('/users/:id', async (req, res, next) => {
     });
 
     await User.findByIdAndDelete(req.params.id);
+    await recordAudit({
+      action: 'delete',
+      entityType: 'user',
+      entityId: user._id,
+      entityLabel: user.name || user.email,
+      ...actorFromRequest(req)
+    });
     res.json({ message: 'Utilisateur supprimé.' });
   } catch (e) {
     next(e);
@@ -279,6 +312,14 @@ router.patch('/users/:id/approve', async (req, res, next) => {
       targetUser: user,
       details: `Approbation du compte ${user.email}`
     });
+    await recordAudit({
+      action: 'update',
+      entityType: 'user',
+      entityId: user._id,
+      entityLabel: user.name || user.email,
+      ...actorFromRequest(req),
+      changes: [{ field: 'isApproved', from: false, to: true }]
+    });
 
     res.json({ user: serializeUser(user), message: 'Compte approuvé.' });
   } catch (e) {
@@ -302,6 +343,14 @@ router.patch('/users/:id/reject', async (req, res, next) => {
     });
 
     await User.findByIdAndDelete(req.params.id);
+    await recordAudit({
+      action: 'delete',
+      entityType: 'user',
+      entityId: user._id,
+      entityLabel: user.name || user.email,
+      ...actorFromRequest(req),
+      changes: [{ field: 'isApproved', from: false, to: null }]
+    });
     res.json({ message: 'Inscription rejetée et compte supprimé.' });
   } catch (e) {
     next(e);

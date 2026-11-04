@@ -5,7 +5,22 @@ const ApplicationSchema = new mongoose.Schema(
     opportunity: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Opportunity',
-      required: true
+      required: false
+    },
+    // Humanitarian notice (NRC, IRC, …) when the draft is not an RDC Opportunity.
+    notice: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'NrcNotice'
+    },
+    externalOffer: {
+      title: { type: String, default: '' },
+      organization: { type: String, default: '' },
+      url: { type: String, default: '' },
+      ville: { type: String, default: '' },
+      country: { type: String, default: '' },
+      deadline: { type: Date },
+      description: { type: String, default: '' },
+      reference: { type: String, default: '' }
     },
     status: {
       type: String,
@@ -39,9 +54,18 @@ const ApplicationSchema = new mongoose.Schema(
       attachmentName: String,
       gmailMessageId: String,
       sentAt: Date
-    }
+    },
+    statusEvents: [
+      {
+        status: { type: String, required: true },
+        at: { type: Date, required: true }
+      }
+    ],
+    archivedAt: { type: Date, default: null }
   },
   { timestamps: true }
 );
+
+ApplicationSchema.index({ notice: 1 }, { unique: true, partialFilterExpression: { notice: { $type: 'objectId' } } });
 
 export default mongoose.model('Application', ApplicationSchema);

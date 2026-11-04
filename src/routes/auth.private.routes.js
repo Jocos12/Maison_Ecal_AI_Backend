@@ -113,7 +113,7 @@ router.post('/email/request', authLimiter, async (req, res, next) => {
     }
     const code = generateOtpDigits();
     try {
-      await sendOtpEmail(email, code);
+      await sendOtpEmail(email, code, { purpose: 'email' });
     } catch (e) {
       logger.error(`E-mail change code could not be delivered to ${email}: ${e.message}`);
       return badRequest(res, 'Impossible d’envoyer le code pour le moment. Réessayez plus tard.', 502);
