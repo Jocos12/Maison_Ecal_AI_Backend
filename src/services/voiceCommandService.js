@@ -3,11 +3,12 @@ import { detectMessageLanguage, languageLabel } from '../utils/detectMessageLang
 import logger from '../utils/logger.js';
 import {
   countOpportunities,
-  createDraftApplication,
   detectCity,
   findOpportunityByHint,
-  listApplications
+  listApplications,
+  listMatchingOpportunities
 } from './voiceToolRuntime.js';
+import { answerFromContracts, listContracts } from './contractService.js';
 
 /** READ-ONLY tools — execute immediately, no confirmation */
 export const VOICE_TOOLS_READ = Object.freeze([
@@ -16,7 +17,9 @@ export const VOICE_TOOLS_READ = Object.freeze([
   'filtrerOffres',
   'afficherCandidatures',
   'compterOffres',
-  'lireCandidatures'
+  'lireCandidatures',
+  'obtenirStatsContrats',
+  'listerContrats'
 ]);
 
 /** WRITE tools — draft creation is allowed; email send is never done here */
@@ -26,41 +29,57 @@ const TOOL_NAMES = [...VOICE_TOOLS_READ, ...VOICE_TOOLS_WRITE];
 
 export const VOICE_AGENT_SYSTEM_PROMPT = `Tu es l'assistant emploi de M-ECAL (Maison d'Études, Conseil & Assistance Logistique, RDC).
 
-Tu gères DEUX registres clairement séparés :
+COMPORTEMENT — priorité absolue
+Quand on te pose une question, ta priorité absolue est d'y répondre réellement — jamais de répondre par une liste de ce que tu sais faire en général. Si la réponse nécessite une donnée du système (offres, candidatures, statuts), appelle d'abord la fonction appropriée pour récupérer cette donnée réelle, puis réponds avec elle, de façon directe et concrète.
+
+Si tu ne peux traiter qu'une partie de la demande, dis ce que tu as fait, puis dis en une phrase simple ce que tu ne peux pas faire — sans t'excuser de façon excessive et sans lister tes fonctions disponibles comme un menu.
+
+Si tu ne peux vraiment rien faire sur cette demande, dis-le en une phrase claire, et si une alternative utile existe, propose-la. Exemple : si on te demande une action que tu ne sais pas faire, ne réponds pas « je peux afficher les offres, les candidatures… » — réponds plutôt « je ne peux pas faire X pour le moment, mais je peux Y si ça t'aide ».
+
+Ne reformule jamais une question précise de l'utilisateur en question ouverte. Si on te demande « quelles offres correspondent à M-ECAL », ne réponds pas par « que puis-je faire pour vous ? » — va chercher la réponse et donne-la.
+
+Sois concis, direct, et évite les formules vagues ou les réponses qui ne font que décrire tes capacités sans agir dessus.
+
+Deux registres :
 
 1) CONVERSATION GÉNÉRALE (small talk, « comment tu vas ? », questions sur toi, remerciements, blagues légères)
-→ Réponds normalement et naturellement, comme un collègue serviable : chaleureux, court, direct.
-→ Exemple : « Comment tu vas ? » → « Ça va bien, merci ! Je suis prêt à t'aider sur les offres ou candidatures. Et toi ? »
-→ Pas de réponse vague, robotique, ni de digression sur les offres si ce n'est pas demandé.
+→ Réponds naturellement, comme un collègue : chaleureux, court, direct.
+→ Exemple : « Comment tu vas ? » → « Ça va bien, merci. Et toi ? »
+→ Pas de liste de fonctions, pas de « que puis-je faire pour vous ? ».
 → actions = [] (aucune navigation).
 
 2) QUESTIONS FACTUELLES / COMMANDES sur le système (offres, candidatures, stats, navigation, postuler)
-→ Base-toi uniquement sur les données réelles de l'app quand elles sont fournies. Ne jamais inventer un nombre, un statut, une offre, un ID ou une organisation.
-→ Si tu n'as pas la donnée : dis-le clairement.
-→ Sois concis, clair, droit au but, sans formules creuses.
+→ Base-toi uniquement sur les données réelles renvoyées par les outils. N'invente jamais un nombre, un statut, une offre, un ID ou une organisation.
+→ Si l'outil ne renvoie rien, dis-le en une phrase. Ne compense pas par un menu.
 
 Tu analyses la commande et renvoies UNIQUEMENT un JSON valide :
 {
-  "reply": "phrase courte à lire à voix haute (même langue que l'utilisateur)",
+  "reply": "réponse directe, même langue que l'utilisateur",
   "actions": [ { "tool": "<nom>", "args": { } } ],
   "awaitConfirmation": false
 }
 
 Outils LECTURE (exécution directe, awaitConfirmation=false) :
-- naviguerVers: args { "page": "opportunities|applications|dashboard|sources|settings|agent|messaging|analytics|alerts|archive|marketing|assistant-emploi" }
+- naviguerVers: args { "page": "opportunities|applications|dashboard|sources|settings|agent|messaging|analytics|alerts|archive|marketing|assistant-emploi|contrats|cycle" }
 - afficherOffres / filtrerOffres: args { "search"?: string, "category"?: string, "ville"?: string, "mecalFit"?: boolean, "offreId"?: string }
+  → mecalFit=true quand on demande quelles offres cadrent / correspondent à M-ECAL.
 - compterOffres: args { "ville"?: string, "today"?: boolean, "search"?: string }
 - afficherCandidatures: args { "statut"?: "draft|submitted|pending|won|rejected" }
 - lireCandidatures: args { "statut"?: string }
+  → statut "pending" pour « en attente ».
+- obtenirStatsContrats / listerContrats: args { "owner"?: "me"|"all" }
+  → chiffres et liste réels des contrats. Jamais de montant inventé.
+- Pour supprimer ou modifier un contrat : ne appelle aucun outil d'écriture. Dis que la confirmation se fait sur la page Contrats. actions = [{ "tool": "naviguerVers", "args": { "page": "contrats" } }].
 
 Outils ÉCRITURE :
 - preparerCandidature: args { "offreId"?: string, "title"?: string, "search"?: string, "offerIndex"?: number }
-  → crée un BROUILLON (réversible). JAMAIS d'envoi d'e-mail.
-  → reply confirme verbalement l'action.
+  → prépare seulement. Ne crée rien et n'envoie rien tant que l'utilisateur n'a pas confirmé explicitement.
+  → reply nomme l'offre et demande cette confirmation. awaitConfirmation=true.
 
-SÉCURITÉ :
+SÉCURITÉ (inchangée) :
 - N'envoie JAMAIS d'e-mail et n'archive JAMAIS via ces outils.
-- Pour un envoi réel : invite à cliquer « Postuler » puis « Confirmer et envoyer ».
+- Aucune candidature n'est enregistrée sans confirmation explicite de l'utilisateur.
+- Pour un envoi réel : l'utilisateur doit confirmer, puis « Confirmer et envoyer ».
 
 Langue de reply : {{LANG}}.`;
 
@@ -71,44 +90,58 @@ function heuristicParse(text = '', locale = 'fr') {
   // Small talk / conversation générale — no tools
   if (
     !/\b(offre|offres|candidature|postul|opportunit|job|apply|navigue|montre|affiche|filtre)\b/.test(m) &&
-    /\b(comment (tu|ca|ça) va|ca va|ça va|how are you|how're you|qui es[- ]tu|who are you|bonjour|salut|hello|hi|hey|merci|thanks|thank you|bonne (journee|soirée)|au revoir|bye)\b/.test(
+    /\b(comment (tu|ca|ça) vas?\b|ca va\b|ça va\b|how are you|how're you|qui es[- ]tu|who are you|bonjour|salut|hello|hi\b|hey\b|merci|thanks|thank you|bonne (journee|soirée)|au revoir|bye)\b/.test(
       m
     )
   ) {
     if (/comment (tu|ca|ça) va|ca va\b|ça va\b|how are you/.test(m)) {
       return {
         reply: isEn
-          ? "I'm doing well, thanks! Ready to help with jobs or applications — how about you?"
-          : 'Ça va bien, merci ! Je suis prêt à t’aider sur les offres ou candidatures. Et toi ?',
+          ? "I'm doing well, thanks. And you?"
+          : 'Ça va bien, merci. Et toi ?',
         actions: [],
-        awaitConfirmation: false
+        awaitConfirmation: false,
+        decisive: true
       };
     }
     if (/qui es[- ]tu|who are you/.test(m)) {
       return {
         reply: isEn
           ? "I'm the M-ECAL job assistant for logistics opportunities in the DRC."
-          : 'Je suis l’assistant emploi M-ECAL pour la logistique en RDC.',
+          : 'Je suis l’assistant emploi M-ECAL, pour la logistique en RDC.',
         actions: [],
-        awaitConfirmation: false
+        awaitConfirmation: false,
+        decisive: true
       };
     }
     if (/merci|thanks|thank you/.test(m)) {
       return {
         reply: isEn ? "You're welcome!" : 'Avec plaisir !',
         actions: [],
-        awaitConfirmation: false
+        awaitConfirmation: false,
+        decisive: true
       };
     }
     if (/bonjour|salut|hello|hi|hey/.test(m)) {
       return {
-        reply: isEn
-          ? 'Hi! How can I help — offers, applications, or something else?'
-          : 'Bonjour ! Je peux t’aider sur les offres, les candidatures, ou autre chose ?',
+        reply: isEn ? 'Hi.' : 'Bonjour.',
         actions: [],
-        awaitConfirmation: false
+        awaitConfirmation: false,
+        decisive: true
       };
     }
+  }
+
+  if (
+    /\b(telephone|phone|call me|m'appeler|m appeler)\b/.test(m) &&
+    !/\b(offre|candidature|postul)\b/.test(m)
+  ) {
+    return {
+      reply: isEn ? "I can't call you on the phone." : 'Je ne peux pas vous appeler au téléphone.',
+      actions: [],
+      awaitConfirmation: false,
+      decisive: true
+    };
   }
 
   if (/\b(combien|how many|nombre)\b/.test(m) && /\b(offre|offres|opportunit|jobs?)\b/.test(m)) {
@@ -161,12 +194,43 @@ function heuristicParse(text = '', locale = 'fr') {
     };
   }
 
+  if (/\bcontrats?\b/.test(m) && /\b(supprim|effac|modifi)/.test(m)) {
+    return {
+      reply: isEn
+        ? 'I will not change a contract without your confirmation on the Contracts page.'
+        : 'Je ne modifie ni ne supprime un contrat sans votre confirmation sur la page Contrats et travaux.',
+      actions: [{ tool: 'naviguerVers', args: { page: 'contrats' } }],
+      awaitConfirmation: false
+    };
+  }
+
+  if (/\bcontrats?\b/.test(m) && /\b(combien|taux|gagn|liste|montre|affiche)\b/.test(m)) {
+    const listing = /\b(liste|montre|affiche)\b/.test(m);
+    return {
+      reply: listing
+        ? isEn
+          ? 'Here are the stored contracts.'
+          : 'Voici les contrats enregistrés.'
+        : isEn
+          ? 'Here are the contract figures.'
+          : 'Voici les chiffres des contrats.',
+      actions: [
+        {
+          tool: listing ? 'listerContrats' : 'obtenirStatsContrats',
+          args: { owner: /\b(mes|mon|my)\b/.test(m) ? 'me' : 'all' }
+        }
+      ],
+      awaitConfirmation: false
+    };
+  }
+
   if (/\b(postule|postuler|apply|candidater|prepare|prépare|preparer|préparer)\b/.test(m) && /\b(candidature|offre|post)\b/.test(m)) {
     const idx = m.match(/\b(?:offre|offer)\s*(?:n[°o.]?\s*)?(\d+)\b/);
     const offerIndex = idx ? Number(idx[1]) - 1 : null;
-    const titleMatch = String(text).match(
-      /(?:pour|offre)\s+(?:l['’]|la\s+|le\s+)?(.{2,80}?)(?:\s*$|\.|!|\?)/i
-    );
+    const namedOffer = String(text).match(/\boffre\s+(?:de\s+|d['’]\s*)?([A-Za-zÀ-ÿ0-9][^?.!]{1,80})$/i);
+    const titleMatch = namedOffer
+      ? namedOffer
+      : String(text).match(/(?:pour|offre)\s+(?:l['’]|la\s+|le\s+)?(.{2,80}?)(?:\s*$|\.|!|\?)/i);
     const title = titleMatch ? titleMatch[1].trim() : '';
     return {
       reply: isEn
@@ -181,6 +245,18 @@ function heuristicParse(text = '', locale = 'fr') {
           }
         }
       ],
+      awaitConfirmation: false
+    };
+  }
+
+  if (
+    /\b(offre|offres|opportunit)\b/.test(m) &&
+    /(cadr|correspond|m-?ecal|maison\s*ecal|convien)/.test(m) &&
+    !/\b(postul|apply|candidater)\b/.test(m)
+  ) {
+    return {
+      reply: isEn ? 'Here are the offers that fit M-ECAL.' : 'Voici les offres qui cadrent avec M-ECAL.',
+      actions: [{ tool: 'afficherOffres', args: { mecalFit: true } }],
       awaitConfirmation: false
     };
   }
@@ -219,6 +295,13 @@ function heuristicParse(text = '', locale = 'fr') {
     /\b(va|ouvre|open|go|navigue|amener|montre|affiche|voir|page)\b/.test(m) ||
     /\b(source|sources|veille|eveil)\b/.test(m)
   ) {
+    if (/\bcycle\b|parcours/.test(m)) {
+      return {
+        reply: isEn ? 'Opening the lifecycle page.' : 'Direction Cycle de vie.',
+        actions: [{ tool: 'naviguerVers', args: { page: 'cycle' } }],
+        awaitConfirmation: false
+      };
+    }
     if (/candidature|application/.test(m)) {
       return {
         reply: isEn ? 'Going to Applications.' : 'Direction Candidatures.',
@@ -255,6 +338,13 @@ function heuristicParse(text = '', locale = 'fr') {
         awaitConfirmation: false
       };
     }
+    if (/contrat/.test(m)) {
+      return {
+        reply: isEn ? 'Opening Contracts and work.' : 'Direction Contrats et travaux.',
+        actions: [{ tool: 'naviguerVers', args: { page: 'contrats' } }],
+        awaitConfirmation: false
+      };
+    }
     if (/assistant|emploi/.test(m)) {
       return {
         reply: isEn ? 'Opening the job assistant.' : 'J’ouvre l’Assistant Emploi.',
@@ -265,9 +355,7 @@ function heuristicParse(text = '', locale = 'fr') {
   }
 
   return {
-    reply: isEn
-      ? 'I can chat, show applications, filter opportunities, navigate, or prepare an application (with your confirmation). What do you need?'
-      : 'Je peux discuter, afficher les candidatures, filtrer des offres, naviguer, ou préparer une candidature (avec votre confirmation). Que puis-je faire ?',
+    reply: isEn ? "I can't do that." : 'Je ne peux pas faire ça.',
     actions: [],
     awaitConfirmation: false
   };
@@ -300,7 +388,7 @@ function sanitizePayload(raw, locale) {
   };
 }
 
-async function executeActions(payload, locale) {
+async function executeActions(payload, locale, userId = null) {
   const isEn = locale === 'en';
   const extra = { toolResults: {}, createdApplication: null };
   const actions = payload.actions || [];
@@ -328,10 +416,12 @@ async function executeActions(payload, locale) {
     if (action.tool === 'lireCandidatures') {
       const result = await listApplications(action.args || {});
       extra.toolResults.lireCandidatures = result;
+      const statusLabel =
+        result.statut === 'pending' ? (isEn ? 'pending' : 'en attente') : result.statut;
       replies.push(
         isEn
-          ? `You have ${result.total} application(s)${result.statut ? ` in status ${result.statut}` : ''}.`
-          : `Vous avez ${result.total} candidature(s)${result.statut ? ` au statut ${result.statut}` : ''}.`
+          ? `You have ${result.total} application(s)${statusLabel ? ` ${statusLabel}` : ''}.`
+          : `Vous avez ${result.total} candidature${result.total > 1 ? 's' : ''}${statusLabel ? ` ${statusLabel}` : ''}.`
       );
     }
     if (action.tool === 'preparerCandidature') {
@@ -342,29 +432,73 @@ async function executeActions(payload, locale) {
         );
         continue;
       }
-      const created = await createDraftApplication(opp);
-      extra.createdApplication = {
-        id: String(created.application?._id || ''),
+      // Stage only. ApplicationConfirmGate persists the draft after an explicit confirm.
+      const prepared = {
+        offreId: String(opp._id),
         title: opp.title,
-        alreadyExisted: created.alreadyExisted
+        organization: opp.organization || opp.platform || '',
+        ville: opp.ville || opp.location || 'RDC'
       };
-      extra.toolResults.preparerCandidature = extra.createdApplication;
+      action.args = { ...action.args, offreId: prepared.offreId, title: prepared.title };
+      extra.preparedApplication = prepared;
+      extra.toolResults.preparerCandidature = prepared;
+      payload.awaitConfirmation = true;
       replies.push(
-        created.alreadyExisted
-          ? isEn
-            ? `A draft already exists for “${opp.title}”.`
-            : `Un brouillon existe déjà pour « ${opp.title} ».`
-          : isEn
-            ? `Alright, I created a draft application for “${opp.title}”.`
-            : `D’accord, j’ai créé une candidature brouillon pour « ${opp.title} ».`
+        isEn
+          ? `I can prepare a draft for “${opp.title}”. Nothing is saved until you confirm.`
+          : `Je prépare un brouillon pour « ${opp.title} ». Rien n’est enregistré tant que vous n’avez pas confirmé.`
       );
     }
     if (action.tool === 'filtrerOffres' || action.tool === 'afficherOffres') {
+      const listed = await listMatchingOpportunities(action.args || {});
+      extra.toolResults.afficherOffres = listed;
       const ville = action.args?.ville;
+      if (!listed.items.length) {
+        const reviewNote =
+          action.args?.mecalFit && listed.review
+            ? isEn
+              ? ` ${listed.review} still need a review.`
+              : ` ${listed.review} sont encore à vérifier.`
+            : '';
+        replies.push(
+          (action.args?.mecalFit
+            ? isEn
+              ? 'No active offer currently fits M-ECAL.'
+              : 'Aucune offre active ne cadre avec M-ECAL pour le moment.'
+            : isEn
+              ? `No matching offers${ville ? ` in ${ville}` : ''}.`
+              : `Aucune offre correspondante${ville ? ` à ${ville}` : ''}.`) + reviewNote
+        );
+      } else {
+        const lines = listed.items
+          .map((o, i) => `${i + 1}. ${o.title}${o.organization ? ` — ${o.organization}` : ''}`)
+          .join(' ; ');
+        const n = listed.total;
+        const head = action.args?.mecalFit
+          ? isEn
+            ? `${n} offer${n > 1 ? 's' : ''} fit M-ECAL:`
+            : `${n} offre${n > 1 ? 's' : ''} ${n > 1 ? 'cadrent' : 'cadre'} avec M-ECAL :`
+          : isEn
+            ? `${n} matching offer${n > 1 ? 's' : ''}${ville ? ` in ${ville}` : ''}:`
+            : `${n} offre${n > 1 ? 's' : ''} correspondante${n > 1 ? 's' : ''}${ville ? ` à ${ville}` : ''} :`;
+        replies.push(`${head} ${lines}`);
+      }
+    }
+    if (action.tool === 'obtenirStatsContrats' || action.tool === 'listerContrats') {
+      const owner = action.args?.owner === 'me' ? 'me' : 'all';
+      const rows = await listContracts({ userId, owner });
+      extra.toolResults[action.tool] = { total: rows.length };
       replies.push(
-        isEn
-          ? `Alright, I am filtering the offers${ville ? ` in ${ville}` : ''}.`
-          : `D’accord, je filtre les offres${ville ? ` de ${ville}` : ''}.`
+        action.tool === 'listerContrats'
+          ? rows.length
+            ? rows
+                .slice(0, 6)
+                .map((row, i) => `${i + 1}. ${row.title} — ${row.client} (${row.status})`)
+                .join(' ; ')
+            : isEn
+              ? 'No contracts stored.'
+              : 'Aucun contrat enregistré.'
+          : answerFromContracts(isEn ? 'summary' : 'résumé', rows, userId)
       );
     }
     if (action.tool === 'afficherCandidatures') {
@@ -384,7 +518,7 @@ async function executeActions(payload, locale) {
  * Parse a voice/text command into a spoken reply + closed tool calls.
  * Never submits applications server-side.
  */
-export async function processVoiceCommand({ text, locale: localeHint } = {}) {
+export async function processVoiceCommand({ text, locale: localeHint, userId = null } = {}) {
   const message = String(text || '').trim();
   if (!message) {
     return {
@@ -397,16 +531,13 @@ export async function processVoiceCommand({ text, locale: localeHint } = {}) {
   const locale = localeHint || detectMessageLanguage(message);
   const heuristic = heuristicParse(message, locale);
 
-  // Prefer fast heuristic for clear small-talk / navigation intents
-  if (
-    heuristic.actions.length === 0 &&
-    /comment (tu|ca|ça) va|ça va|how are you|qui es[- ]tu|bonjour|salut|merci|thanks/i.test(message)
-  ) {
+  // Clear small talk and out-of-scope replies stay as written. Don't let a model replace them with a menu.
+  if (heuristic.decisive && !heuristic.actions.length) {
     return { ...heuristic, provider: 'heuristic' };
   }
 
   if (heuristic.actions.length) {
-    return executeActions({ ...heuristic, provider: 'heuristic' }, locale);
+    return executeActions({ ...heuristic, provider: 'heuristic' }, locale, userId);
   }
 
   try {
@@ -416,8 +547,14 @@ export async function processVoiceCommand({ text, locale: localeHint } = {}) {
       system
     );
     const payload = sanitizePayload(raw, locale);
+    if (
+      !payload.actions.length &&
+      /je peux discuter|i can chat, show applications|que puis-je faire/i.test(payload.reply || '')
+    ) {
+      payload.reply = heuristic.reply;
+    }
     if (!payload.actions.length && heuristic.actions.length) {
-      return executeActions({ ...heuristic, reply: payload.reply || heuristic.reply, provider: 'hybrid' }, locale);
+      return executeActions({ ...heuristic, reply: payload.reply || heuristic.reply, provider: 'hybrid' }, locale, userId);
     }
     // If AI returned empty for small talk with weak reply, prefer heuristic small-talk
     if (
@@ -429,9 +566,9 @@ export async function processVoiceCommand({ text, locale: localeHint } = {}) {
     ) {
       return { ...heuristic, provider: 'heuristic' };
     }
-    return executeActions({ ...payload, provider: 'ai' }, locale);
+    return executeActions({ ...payload, provider: 'ai' }, locale, userId);
   } catch (e) {
     logger.warn(`voiceCommand AI fallback: ${e.message}`);
-    return executeActions({ ...heuristic, provider: 'heuristic' }, locale);
+    return executeActions({ ...heuristic, provider: 'heuristic' }, locale, userId);
   }
 }

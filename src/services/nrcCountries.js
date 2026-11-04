@@ -28,6 +28,7 @@ const ALIASES = {
   drc: 'CD',
   'd r c': 'CD',
   'democratic republic of the congo': 'CD',
+  'congo democratic republic of the': 'CD',
   'democratic republic of congo': 'CD',
   'dr congo kinshasa': 'CD',
   'congo kinshasa': 'CD',
@@ -63,7 +64,7 @@ export function countryCodeFrom(text) {
   if (ALIASES[key]) return ALIASES[key];
   if (BY_NAME.has(key)) return BY_NAME.get(key);
   // "Goma, DR Congo-Kinshasa": try the part after the last comma, then the part before a dash
-  const tail = key.includes(',') ? norm(raw.split(',').pop()) : '';
+  const tail = raw.includes(',') ? norm(raw.split(',').pop()) : '';
   if (tail && (ALIASES[tail] || BY_NAME.has(tail))) return ALIASES[tail] || BY_NAME.get(tail);
   const beforeDash = norm(raw.split(/\s[-–]\s/)[0]);
   if (beforeDash && (ALIASES[beforeDash] || BY_NAME.has(beforeDash))) return ALIASES[beforeDash] || BY_NAME.get(beforeDash);

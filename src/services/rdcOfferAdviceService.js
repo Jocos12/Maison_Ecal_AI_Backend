@@ -3,7 +3,7 @@ import { callAIForJSON, callAIWithFallback, isComplexAiTask } from './aiService.
 import { searchJobsWithAI } from './jobSearchService.js';
 import logger from '../utils/logger.js';
 import { detectMessageLanguage } from '../utils/detectMessageLanguage.js';
-import { answerInLocalMode } from './localModeAssistant.js';
+import { answerInLocalMode, tryDirectAnswer } from './localModeAssistant.js';
 import { getLanguageInstruction } from '../prompts/jobAssistantPrompt.js';
 import { activeOpportunityFilter } from './opportunityLifecycle.js';
 import { getAgentSystemSnapshot } from './agentContextService.js';
@@ -304,6 +304,11 @@ export async function chatAboutRdcOffer({
   userId = null
 }) {
   const thread = (messages?.length ? messages : history) || [];
+  const localeEarly = detectMessageLanguage(message, thread);
+  const direct = await tryDirectAnswer({ lastUser: message, locale: localeEarly });
+  if (direct?.reply) {
+    return { reply: direct.reply, jobs: [], isSearch: false, provider: direct.provider || 'local' };
+  }
   const historyText = thread
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .slice(-16)

@@ -1,5 +1,6 @@
 import Opportunity from '../models/Opportunity.js';
 import Application from '../models/Application.js';
+import { activeOpportunityFilter } from './opportunityLifecycle.js';
 
 const CITIES = ['Kinshasa', 'Goma', 'Bukavu', 'Kalemie', 'Lubumbashi'];
 
@@ -55,6 +56,50 @@ export async function listApplications({ statut } = {}) {
       status: a.status,
       title: a.opportunity?.title || '',
       organization: a.opportunity?.organization || ''
+    }))
+  };
+}
+
+/** Active offers for a spoken answer. mecalFit = strict M-ECAL métier confirmé. */
+export async function listMatchingOpportunities({ ville, search, mecalFit, limit = 6 } = {}) {
+  const parts = [activeOpportunityFilter()];
+  if (ville) parts.push(cityQuery(ville));
+  if (search) {
+    const re = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 80), 'i');
+    parts.push({ $or: [{ title: re }, { organization: re }, { description: re }] });
+  }
+  if (mecalFit) {
+    parts.push({
+      $or: [
+        { 'strictMecalMatch.status': 'metier_confirme' },
+        { isRecommended: true },
+        { aiRelevanceScore: { $gte: 0.55 } }
+      ]
+    });
+  }
+  const filter = { $and: parts };
+  const cap = Math.min(Number(limit) || 6, 8);
+  const [total, rows] = await Promise.all([
+    Opportunity.countDocuments(filter),
+    Opportunity.find(filter)
+      .sort({ deadline: 1, aiRelevanceScore: -1 })
+      .limit(cap)
+      .select('title organization ville platform')
+      .lean()
+  ]);
+  let review = 0;
+  if (mecalFit && total === 0) {
+    review = await Opportunity.countDocuments(
+      activeOpportunityFilter({ 'strictMecalMatch.status': 'a_verifier' })
+    );
+  }
+  return {
+    total,
+    review,
+    items: rows.map((o) => ({
+      title: o.title,
+      organization: o.organization || o.platform || '',
+      ville: o.ville || ''
     }))
   };
 }

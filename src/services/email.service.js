@@ -113,6 +113,163 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+/** Visual system for the three one-time-code e-mails. */
+const OTP_VARIANTS = {
+  login: {
+    subject: 'Votre code de vérification M-ECAL',
+    kicker: 'Connexion sécurisée',
+    title: 'Votre code de vérification',
+    lead: 'Saisissez ces six chiffres dans M-ECAL pour confirmer que c’est bien vous.',
+    footnote:
+      'Si vous n’avez pas demandé ce code, ignorez cet e-mail. Personne de l’équipe M-ECAL ne vous le demandera jamais.',
+    accent: '#24478a',
+    ink: '#1b3a73',
+    soft: '#eef3fb',
+    edge: '#c5d4ee',
+    stripe: 'linear-gradient(90deg,#24478a 0%,#2f62b3 55%,#8aafdf 100%)'
+  },
+  email: {
+    subject: 'Confirmez votre nouvelle adresse M-ECAL',
+    kicker: 'Nouvelle adresse',
+    title: 'Confirmez votre e-mail',
+    lead: 'Utilisez ce code pour valider le changement d’adresse de votre compte M-ECAL.',
+    footnote:
+      'Si vous n’êtes pas à l’origine de cette demande, ignorez cet e-mail. L’adresse de votre compte ne sera pas modifiée.',
+    accent: '#0f5f6b',
+    ink: '#0c4a52',
+    soft: '#e7f6f7',
+    edge: '#b7dde1',
+    stripe: 'linear-gradient(90deg,#0c3d45 0%,#0f5f6b 50%,#3aa8b5 100%)'
+  },
+  reset: {
+    subject: 'Code de réinitialisation de votre mot de passe M-ECAL',
+    kicker: 'Mot de passe',
+    title: 'Choisissez un nouveau mot de passe',
+    lead: 'Saisissez ce code dans l’application pour définir un nouveau mot de passe.',
+    footnote:
+      'Si vous n’êtes pas à l’origine de cette demande, ignorez cet e-mail. Votre mot de passe ne sera pas modifié.',
+    accent: '#9a5410',
+    ink: '#7c3f0c',
+    soft: '#fdf6ec',
+    edge: '#f0d7b0',
+    stripe: 'linear-gradient(90deg,#7c3f0c 0%,#c47a1a 58%,#e8b15a 100%)'
+  }
+};
+
+function otpDigitsRow(code, tone) {
+  const digits = String(code || '').replace(/\s/g, '').split('');
+  const cells = digits
+    .map(
+      (digit) => `<td align="center" valign="middle" width="46" height="58" style="width:46px;height:58px;background-color:${tone.soft};border:1px solid ${tone.edge};border-bottom:3px solid ${tone.accent};border-radius:14px;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:26px;font-weight:700;line-height:58px;color:${tone.ink};">${escapeHtml(digit)}</td>`
+    )
+    .join('');
+  return `<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="border-collapse:separate;border-spacing:8px 0;margin:0 auto;"><tr>${cells}</tr></table>`;
+}
+
+/**
+ * Pretty, table-based one-time-code e-mail. Inline styles only, so Gmail keeps the layout.
+ * @returns {{ subject: string, html: string, text: string }}
+ */
+export function renderOtpEmail({ code, purpose = 'login' } = {}) {
+  const tone = OTP_VARIANTS[purpose] || OTP_VARIANTS.login;
+  const safeCode = escapeHtml(String(code || '').replace(/\s/g, ''));
+  const spaced = String(code || '')
+    .replace(/\s/g, '')
+    .split('')
+    .join(' ');
+  const preheader = `Code M-ECAL : ${safeCode}. Il expire dans 10 minutes.`;
+  const pad = '&nbsp;&zwnj;'.repeat(24);
+
+  const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <title>${escapeHtml(tone.subject)}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#e7eef8;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;mso-hide:all;">${preheader}${pad}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#e7eef8;">
+    <tr>
+      <td align="center" style="padding:36px 14px;">
+        <!--[if mso]><table role="presentation" width="520" align="center" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;">
+          <tr>
+            <td style="background-color:#ffffff;border:1px solid #d5e2f3;border-radius:22px;overflow:hidden;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td height="6" style="height:6px;background-color:${tone.accent};background-image:${tone.stripe};font-size:0;line-height:0;">&nbsp;</td>
+                </tr>
+              </table>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:28px 28px 0;">
+                    <table role="presentation" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td width="42" height="42" align="center" valign="middle" style="width:42px;height:42px;background-color:${tone.accent};border-radius:13px;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:18px;font-weight:800;line-height:42px;color:#ffffff;">M</td>
+                        <td style="padding-left:12px;">
+                          <div style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;font-weight:800;letter-spacing:0.08em;color:#0e1c33;">M-ECAL</div>
+                          <div style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.4;color:#64748b;padding-top:2px;">Moniteur d’opportunités logistiques · RDC</div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:22px 28px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
+                    <div style="display:inline-block;padding:5px 11px;border-radius:999px;background-color:${tone.soft};color:${tone.accent};font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;">${escapeHtml(tone.kicker)}</div>
+                    <h1 style="margin:14px 0 8px;font-size:24px;line-height:1.25;font-weight:700;color:#0e1c33;">${escapeHtml(tone.title)}</h1>
+                    <p style="margin:0;font-size:15px;line-height:1.6;color:#475569;">${escapeHtml(tone.lead)}</p>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:26px 16px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
+                    <div style="font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#94a3b8;padding-bottom:12px;">Code à 6 chiffres</div>
+                    ${otpDigitsRow(code, tone)}
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:18px 28px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
+                    <div style="display:inline-block;padding:8px 14px;border-radius:999px;background-color:#f4f7fb;border:1px solid #e2e8f0;color:#334155;font-size:13px;line-height:1.4;">Valable <strong style="color:${tone.ink};">10 minutes</strong> · à usage unique</div>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:22px 28px 28px;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
+                    <div style="padding:14px 16px;background-color:#f8fafc;border:1px solid #e6edf5;border-left:3px solid ${tone.accent};border-radius:12px;font-size:13px;line-height:1.6;color:#64748b;">${escapeHtml(tone.footnote)}</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:16px 8px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#94a3b8;">
+              Message automatique de la plateforme M-ECAL.<br>Merci de ne pas répondre à cet e-mail.
+            </td>
+          </tr>
+        </table>
+        <!--[if mso]></td></tr></table><![endif]-->
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  const text = [
+    `M-ECAL — ${tone.title}`,
+    '',
+    tone.lead,
+    '',
+    `Votre code : ${spaced}`,
+    '',
+    'Ce code expire dans 10 minutes et ne sert qu’une seule fois.',
+    tone.footnote
+  ].join('\n');
+
+  return { subject: tone.subject, html, text };
+}
+
 function wrapHtml(title, inner) {
   return `<!DOCTYPE html>
 <html lang="fr">
@@ -186,25 +343,14 @@ export async function sendHtmlEmail({ to, subject, html, text }) {
   return deliverMail({ to, subject, html, text });
 }
 
-export async function sendOtpEmail(to, code) {
+export async function sendOtpEmail(to, code, { purpose = 'login' } = {}) {
   if (!isEmailDeliveryConfigured()) {
     logger.warn('E-mail not configured — OTP email skipped');
     return { sent: false };
   }
-  const html = wrapHtml(
-    'Vérification M-ECAL',
-    `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Voici votre code de vérification :</p>
-    <div style="text-align:center;margin:24px 0;padding:20px 16px;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.35);border-radius:12px;">
-      <span style="font-size:2rem;font-weight:700;letter-spacing:0.35em;color:#60a5fa;font-family:ui-monospace,monospace;">${code}</span>
-    </div>
-    <p style="margin:0;font-size:13px;color:#94a3b8;">Ce code expire dans <strong style="color:#e2e8f0;">10 minutes</strong>.</p>
-    <p style="margin:16px 0 0;font-size:13px;color:#94a3b8;">Si vous n'avez pas demandé ce code, ignorez cet e-mail.</p>`
-  );
-  return deliverMail({
-    to,
-    subject: 'Votre code de vérification M-ECAL',
-    html
-  });
+  const variant = purpose === 'email' ? 'email' : 'login';
+  const { subject, html, text } = renderOtpEmail({ code, purpose: variant });
+  return deliverMail({ to, subject, html, text });
 }
 
 export async function sendWelcomeEmail(to, name, { pendingApproval = false } = {}) {
@@ -244,30 +390,8 @@ export async function sendPasswordResetOtpEmail(to, code) {
     logger.warn('E-mail not configured, reset code email skipped');
     return { sent: false };
   }
-  const html = wrapHtml(
-    'Réinitialisation M-ECAL',
-    `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Vous avez demandé la réinitialisation de votre mot de passe. Saisissez ce code dans l'application :</p>
-    <div style="text-align:center;margin:24px 0;padding:20px 16px;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.35);border-radius:12px;">
-      <span style="font-size:2rem;font-weight:700;letter-spacing:0.35em;color:#60a5fa;font-family:ui-monospace,monospace;">${code}</span>
-    </div>
-    <p style="margin:0;font-size:13px;color:#94a3b8;">Ce code expire dans <strong style="color:#e2e8f0;">10 minutes</strong>.</p>
-    <p style="margin:16px 0 0;font-size:12px;color:#64748b;">Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail : votre mot de passe ne sera pas modifié.</p>`
-  );
-  const text = [
-    'Réinitialisation de votre mot de passe M-ECAL',
-    '',
-    `Votre code de vérification : ${code}`,
-    '',
-    'Ce code expire dans 10 minutes.',
-    "Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail."
-  ].join('\n');
-
-  return deliverMail({
-    to,
-    subject: 'Code de réinitialisation de votre mot de passe M-ECAL',
-    html,
-    text
-  });
+  const { subject, html, text } = renderOtpEmail({ code, purpose: 'reset' });
+  return deliverMail({ to, subject, html, text });
 }
 
 export async function resolveAdminNotifyEmails() {

@@ -16,7 +16,7 @@ router.post('/command', async (req, res, next) => {
     if (!text || !String(text).trim()) {
       return res.status(400).json({ message: 'Champ text requis.' });
     }
-    const result = await processVoiceCommand({ text, locale });
+    const result = await processVoiceCommand({ text, locale, userId: req.userId });
     res.json(result);
   } catch (e) {
     next(e);

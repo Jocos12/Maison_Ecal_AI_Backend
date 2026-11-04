@@ -1,6 +1,7 @@
 import axios from 'axios';
 import https from 'https';
 import { gmailConfig } from '../config/gmail.js';
+import logger from '../utils/logger.js';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -180,14 +181,32 @@ export async function gmailApiRequest(oauth2, method, path, { params, data } = {
       throw error;
     }
     const status = error.response?.status;
-    const oauthError = error.response?.data?.error;
+    const body = error.response?.data;
+    const oauthError = body?.error;
+    const reason =
+      oauthError?.errors?.[0]?.reason ||
+      oauthError?.details?.[0]?.reason ||
+      null;
     const apiMessage =
-      error.response?.data?.error?.message ||
+      oauthError?.message ||
       (typeof oauthError === 'string' ? oauthError : null) ||
-      error.response?.data?.error_description ||
+      body?.error_description ||
       error.message;
+    logger.warn('Gmail API error', {
+      status: status || null,
+      reason,
+      google: oauthError || body || error.message
+    });
+    const insufficient =
+      reason === 'insufficientPermissions' || reason === 'ACCESS_TOKEN_SCOPE_INSUFFICIENT';
     const err = new Error(apiMessage || 'Erreur API Gmail');
-    if (oauthError === 'invalid_grant' || status === 401 || status === 403) {
+    err.gmailDetail = oauthError || null;
+    if (insufficient) {
+      err.message =
+        'Droits Gmail insuffisants pour modifier ce message. Reconnectez Gmail pour autoriser gmail.modify.';
+      err.status = 403;
+      err.code = 'gmail_insufficient_scope';
+    } else if (oauthError === 'invalid_grant' || status === 401) {
       err.message = 'Session Gmail expirée. Reconnectez votre compte Gmail.';
       err.status = 401;
       err.code = 'gmail_auth_expired';
