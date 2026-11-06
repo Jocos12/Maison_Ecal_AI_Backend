@@ -2,6 +2,8 @@ import { Router } from 'express';
 import SystemSetting from '../models/SystemSetting.js';
 import GmailToken from '../models/GmailToken.js';
 import { SERVICES_MECAL } from '../config/businessRules.js';
+import { requireManager } from '../middleware/roles.js';
+import { pickKnown } from '../utils/requestSafety.js';
 
 const router = Router();
 
@@ -15,6 +17,12 @@ const DEFAULT_SETTINGS = {
     openAiScoring: false
   }
 };
+
+const SETTINGS_FIELDS = ['profileName', 'interfaceLanguage', 'emailIntegration', 'whatsappIntegration', 'apiIntegrations'];
+const PROFILE_FIELDS = [
+  'companyName', 'director', 'email', 'phone', 'address', 'services', 'cities',
+  'yearsExperience', 'projectReferences', 'description', 'emailTone'
+];
 
 export const DEFAULT_PROFILE = {
   companyName: "Maison d'Études, de Conseil et d'Assistance Logistique",
@@ -40,9 +48,9 @@ router.get('/', async (_req, res, next) => {
   }
 });
 
-router.put('/', async (req, res, next) => {
+router.put('/', requireManager, async (req, res, next) => {
   try {
-    const value = { ...DEFAULT_SETTINGS, ...(req.body || {}) };
+    const value = { ...DEFAULT_SETTINGS, ...pickKnown(req.body, SETTINGS_FIELDS) };
     const doc = await SystemSetting.findOneAndUpdate(
       { key: 'app' },
       { $set: { value } },
@@ -71,9 +79,9 @@ router.get('/profile', async (_req, res, next) => {
   }
 });
 
-router.put('/profile', async (req, res, next) => {
+router.put('/profile', requireManager, async (req, res, next) => {
   try {
-    const incoming = req.body || {};
+    const incoming = pickKnown(req.body, PROFILE_FIELDS);
     const value = {
       ...DEFAULT_PROFILE,
       ...incoming,

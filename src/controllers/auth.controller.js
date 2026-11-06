@@ -25,10 +25,15 @@ const RESET_OTP_RESEND_MS = 60_000;
 const RESET_OTP_MAX_ATTEMPTS = 5;
 
 function cookieOptions() {
+  // En production (HTTPS, front et API sur des domaines différents) : cookie
+  // Secure + SameSite=None. En développement local (http://localhost), Safari
+  // refuse les cookies « Secure » hors HTTPS : on utilise donc un cookie
+  // non sécurisé SameSite=Lax, suffisant puisque Vite relaie /api sur la même origine.
+  const isProd = process.env.NODE_ENV === 'production';
   return {
     httpOnly: true,
-    secure: true,
-    sameSite: 'none',
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
     maxAge: 24 * 60 * 60 * 1000,
     path: '/'
   };

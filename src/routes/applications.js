@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { stripUnsafeKeys } from '../utils/requestSafety.js';
+import { contentDisposition, contentTypeFor, validateUpload } from '../utils/uploadPolicy.js';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
@@ -15,6 +17,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOAD_DIR = path.join(__dirname, '../../uploads/application-docs');
 
 const router = Router();
+
+/** Champs techniques que le client ne doit jamais fixer lui-même. */
+const PROTECTED_FIELDS = ['_id', '__v', 'createdAt', 'updatedAt', 'statusEvents', 'archivedAt', 'auditOrigin'];
+const sanitizeApplicationBody = (input) => stripUnsafeKeys(input, PROTECTED_FIELDS);
+
 
 const ORG_NAME = { nrc: 'NRC', irc: 'IRC', drcngo: 'DRC', icrc: 'ICRC' };
 
@@ -94,7 +101,7 @@ router.get('/', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const actor = actorFromRequest(req);
-    const body = { ...req.body };
+    const body = sanitizeApplicationBody(req.body);
     delete body.auditOrigin;
     if (body.notice && !body.opportunity) {
       if (!mongoose.Types.ObjectId.isValid(body.notice)) {
@@ -180,7 +187,7 @@ router.post('/send-email', async (req, res, next) => {
 router.patch('/:id', async (req, res, next) => {
   try {
     const actor = actorFromRequest(req);
-    const body = { ...req.body };
+    const body = sanitizeApplicationBody(req.body);
     delete body.auditOrigin;
     if (body.sendMethod === '' || body.sendMethod == null) {
       delete body.sendMethod;
@@ -237,13 +244,17 @@ router.post('/:id/documents/upload', async (req, res, next) => {
       return res.status(400).json({ message: 'fileName et fileBase64 requis.' });
     }
 
+    const buffer = Buffer.from(String(fileBase64), 'base64');
+    const invalid = validateUpload({ fileName, buffer });
+    if (invalid) return res.status(400).json({ message: invalid });
+
     const app = await Application.findById(req.params.id);
     if (!app) return res.status(404).json({ message: 'Candidature introuvable.' });
 
     await ensureUploadDir();
     const storageKey = `${crypto.randomBytes(10).toString('hex')}-${safeBaseName(fileName)}`;
     const filePath = path.join(UPLOAD_DIR, storageKey);
-    await fs.writeFile(filePath, Buffer.from(fileBase64, 'base64'));
+    await fs.writeFile(filePath, buffer);
 
     const url = `/api/applications/documents/file/${storageKey}`;
     app.documents.push({
@@ -304,15 +315,9 @@ router.get('/documents/file/:key', async (req, res, next) => {
     if (!exists) return res.status(404).json({ message: 'Fichier introuvable.' });
 
     const buffer = await fs.readFile(filePath);
-    const lower = key.toLowerCase();
-    const type = lower.endsWith('.pdf')
-      ? 'application/pdf'
-      : lower.endsWith('.docx')
-        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : 'application/octet-stream';
-
-    res.setHeader('Content-Type', type);
-    res.setHeader('Content-Disposition', `attachment; filename="${key}"`);
+    res.setHeader('Content-Type', contentTypeFor(key));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', contentDisposition(key));
     res.send(buffer);
   } catch (e) {
     next(e);

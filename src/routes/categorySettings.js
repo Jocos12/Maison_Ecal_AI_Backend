@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { listCategoryDashboard, patchCategorySetting } from '../services/categorySettingsService.js';
+import { requireManager } from '../middleware/roles.js';
 
 const router = Router();
 
@@ -12,7 +13,7 @@ router.get('/', async (_req, res, next) => {
   }
 });
 
-router.patch('/:slug', async (req, res, next) => {
+router.patch('/:slug', requireManager, async (req, res, next) => {
   try {
     const item = await patchCategorySetting(req.params.slug, req.body || {});
     if (!item) return res.status(404).json({ message: 'Catégorie inconnue' });

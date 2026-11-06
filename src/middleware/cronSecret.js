@@ -6,8 +6,8 @@ const BRUTE_FORCE_THRESHOLD = 5;
 const hitsByIp = new Map();
 
 function clientIp(req) {
-  const forwarded = req.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
+  // req.ip respecte « trust proxy » (server.js) : l'en-tête X-Forwarded-For brut
+  // peut être falsifié par n'importe quel client et contournerait le comptage.
   return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 

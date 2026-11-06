@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { contentDisposition, validateUpload } from '../utils/uploadPolicy.js';
 import fs from 'fs/promises';
 import path from 'path';
 import JobAssistantDocument from '../models/JobAssistantDocument.js';
@@ -93,18 +94,14 @@ router.post('/profile/parse-cv', async (req, res, next) => {
     const { cvText, fileName, fileBase64, mimeType, replaceExisting = true } = req.body || {};
     let text = cvText?.trim() || '';
 
-    if (!text && fileName && fileBase64) {
-      const buffer = Buffer.from(fileBase64, 'base64');
-      if (buffer.length > 5 * 1024 * 1024) {
-        return res.status(400).json({ message: 'CV trop volumineux (max 5 Mo).' });
-      }
-      text = await extractTextFromCvFile(buffer, { originalName: fileName, mimeType });
+    // CV : PDF, Word ou texte, 5 Mo maximum, contenu conforme à l'extension.
+    const CV_RULES = { allowed: ['.pdf', '.docx', '.doc', '.txt'], maxBytes: 5 * 1024 * 1024 };
+    if (fileName && fileBase64) {
+      const buffer = Buffer.from(String(fileBase64), 'base64');
+      const invalid = validateUpload({ fileName, buffer, ...CV_RULES });
+      if (invalid) return res.status(400).json({ message: invalid });
+      if (!text) text = await extractTextFromCvFile(buffer, { originalName: fileName, mimeType });
       await saveCvFileForUser(req.userId, { buffer, originalName: fileName });
-    } else if (fileName && fileBase64) {
-      const buffer = Buffer.from(fileBase64, 'base64');
-      if (buffer.length <= 5 * 1024 * 1024) {
-        await saveCvFileForUser(req.userId, { buffer, originalName: fileName });
-      }
     }
 
     if (!text) {
@@ -315,7 +312,7 @@ router.get('/documents/:id/download', async (req, res, next) => {
       return res.status(404).json({ message: 'Fichier PDF introuvable.' });
     }
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${path.basename(doc.fileName)}"`);
+    res.setHeader('Content-Disposition', contentDisposition(doc.fileName));
     const buffer = await fs.readFile(doc.filePath);
     res.send(buffer);
   } catch (e) {

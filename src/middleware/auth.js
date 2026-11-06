@@ -49,3 +49,21 @@ export async function attachUser(req, res, next) {
   }
   next();
 }
+
+/**
+ * À placer après authMiddleware + attachUser sur les routes protégées.
+ * Refuse l'accès si le compte a été supprimé ou n'est plus approuvé, et
+ * aligne req.userRole sur le rôle ACTUEL en base (un changement de rôle ou une
+ * suppression prend effet immédiatement, sans attendre l'expiration du jeton).
+ */
+export function requireActiveUser(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Session invalide. Veuillez vous reconnecter.' });
+  }
+  if (req.user.isApproved === false) {
+    return res.status(403).json({ message: 'Compte en attente de validation.' });
+  }
+  req.userRole = req.user.role;
+  req.userEmail = req.user.email;
+  next();
+}

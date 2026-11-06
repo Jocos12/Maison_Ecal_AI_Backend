@@ -32,10 +32,26 @@ export function markAiSuccess(provider) {
   }
 }
 
+const AI_KEY_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GROQ_API_KEY'];
+
+/** Vrai si au moins une clé d'IA est configurée. Sans clé, sonder ne sert à rien. */
+function anyAiKeyConfigured() {
+  return AI_KEY_VARS.some((name) => String(process.env[name] || '').trim());
+}
+
 export function markAiDegraded() {
   degraded = true;
   lastFailureAt = new Date().toISOString();
   if (probeTimer) return;
+  if (!anyAiKeyConfigured()) {
+    // Aucune clé : pas de sondage toutes les 45 s (il échouerait toujours et
+    // remplirait les logs). Redémarrer le serveur après avoir ajouté une clé.
+    if (!markAiDegraded.noKeyLogged) {
+      logger.warn('[IA] Aucune clé API configurée — mode simplifié, sondage désactivé');
+      markAiDegraded.noKeyLogged = true;
+    }
+    return;
+  }
   probeTimer = setInterval(() => {
     probeAiRecovery().catch(() => {});
   }, PROBE_MS);

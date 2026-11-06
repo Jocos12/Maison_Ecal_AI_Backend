@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "kill-port": "node scripts/kill-port.mjs 5000",
+    "kill-port": "node scripts/kill-port.mjs",
     "predev": "npm run kill-port",
     "dev": "node src/server.js",
+    "test": "node --test test/security.test.mjs",
     "prestart": "npm run kill-port",
     "start": "node src/server.js",
     "reclassify-opportunities": "node scripts/reclassify-opportunities.mjs",

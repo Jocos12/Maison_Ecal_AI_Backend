@@ -15,6 +15,7 @@ import { getAiRuntimeHealth } from '../services/aiRuntimeHealth.js';
 import { getJobAssistantProfile } from '../services/jobAssistantProfileService.js';
 import { handleOpportunityAsk } from '../services/opportunityAskService.js';
 import SystemSetting from '../models/SystemSetting.js';
+import { requireAdmin, requireManager } from '../middleware/roles.js';
 
 const router = Router();
 
@@ -45,9 +46,10 @@ export async function handleAiTest(_req, res, next) {
   }
 }
 
-router.get('/test', handleAiTest);
+router.get('/test', requireAdmin, handleAiTest);
 
-router.post('/test', async (_req, res, next) => {
+// Petit appel de vérification (bouton « Tester l'IA ») : managers et admins.
+router.post('/test', requireManager, async (_req, res, next) => {
   try {
     const result = await callAIWithFallback(
       'Dis bonjour en français en une phrase pour M-ECAL.',
@@ -61,10 +63,11 @@ router.post('/test', async (_req, res, next) => {
 });
 
 export async function handleAiDebug(_req, res) {
-  const mask = (key) => (key && String(key).trim() ? `${String(key).trim().slice(0, 12)}...` : 'MANQUANT');
+  const mask = (key) => (key && String(key).trim() ? 'configurée' : 'MANQUANT');
 
   const results = {
     providers: await getProvidersStatus(),
+    // Seulement « configurée » ou « MANQUANT » : ne jamais renvoyer une partie de la clé.
     env: {
       groq_key: mask(process.env.GROQ_API_KEY),
       gemini_key: mask(process.env.GEMINI_API_KEY),
@@ -78,7 +81,7 @@ export async function handleAiDebug(_req, res) {
   res.json(results);
 }
 
-router.get('/debug', handleAiDebug);
+router.get('/debug', requireAdmin, handleAiDebug);
 
 async function getCombinedProfile(userId) {
   const company = (await getProfile()) || {};

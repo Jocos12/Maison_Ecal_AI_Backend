@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { isAdmin, requireManager } from '../middleware/roles.js';
 import rateLimit from 'express-rate-limit';
 import Source from '../models/Source.js';
 import Opportunity from '../models/Opportunity.js';
@@ -97,7 +98,7 @@ router.get('/', async (_req, res, next) => {
   }
 });
 
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', requireManager, async (req, res, next) => {
   try {
     const { enabled, frequencyHours, url } = req.body || {};
     const patch = {};
@@ -114,7 +115,7 @@ router.put('/:id', async (req, res, next) => {
 
 router.post('/:id/scrape', scrapeLimiter, async (req, res, next) => {
   try {
-    if (!['Admin', 'admin'].includes(req.user?.role)) {
+    if (!isAdmin(req.user)) {
       return res.status(403).json({ message: 'Admin only' });
     }
     const source = await Source.findById(req.params.id).lean();

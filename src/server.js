@@ -4,7 +4,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { cookieParserMiddleware } from './middleware/cookieParse.js';
 import { connectDb } from './config/db.js';
-import { authMiddleware, attachUser } from './middleware/auth.js';
+import { authMiddleware, attachUser, requireActiveUser } from './middleware/auth.js';
+import { requireAdmin } from './middleware/roles.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { requireCronBearer } from './middleware/cronSecret.js';
 import { internalScrapeLimiter } from './middleware/rateLimiter.js';
@@ -98,9 +99,14 @@ app.post('/api/internal/scrape', requireCronBearer, internalScrapeLimiter, async
   }
 });
 
-app.get('/api/ai/debug', handleAiDebug);
-app.get('/api/ai/status', handleAiStatus);
-app.get('/api/ai/test', handleAiTest);
+// Diagnostic IA : debug/test réservés aux administrateurs (ils déclenchent de vrais
+// appels payants vers chaque fournisseur).
+// L'état (configuré oui/non) reste lisible par tout utilisateur connecté : l'interface
+// s'en sert pour afficher le « mode dégradé ».
+const signedIn = [authMiddleware, attachUser, requireActiveUser];
+app.get('/api/ai/debug', ...signedIn, requireAdmin, handleAiDebug);
+app.get('/api/ai/status', ...signedIn, handleAiStatus);
+app.get('/api/ai/test', ...signedIn, requireAdmin, handleAiTest);
 
 app.use('/api/auth', authPublicRoutes);
 app.use('/api/auth', authPrivateRoutes);
@@ -109,6 +115,7 @@ app.use('/api/gmail', gmailRoutes);
 const protectedApi = express.Router();
 protectedApi.use(authMiddleware);
 protectedApi.use(attachUser);
+protectedApi.use(requireActiveUser);
 protectedApi.post('/opportunities/:id/ask', handleOpportunityAsk);
 protectedApi.use('/opportunities', opportunitiesRoutes);
 protectedApi.use('/applications', applicationsRoutes);

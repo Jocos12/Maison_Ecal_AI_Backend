@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { escapeRegex } from '../utils/requestSafety.js';
 import mongoose from 'mongoose';
 import rateLimit from 'express-rate-limit';
 import Opportunity from '../models/Opportunity.js';
@@ -56,7 +57,8 @@ router.get('/', async (req, res, next) => {
       ];
     }
     if (country) {
-      const re = new RegExp(String(country), 'i');
+      // Texte saisi échappé : un caractère spécial ne doit pas casser (ou bloquer) la requête.
+      const re = new RegExp(escapeRegex(country), 'i');
       q.$and = [...(q.$and || []), { $or: [{ location: re }, { ville: re }, { organization: re }] }];
     }
     if (ville) {
